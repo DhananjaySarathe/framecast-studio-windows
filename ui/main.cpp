@@ -2,7 +2,40 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDir>
+#include <QFileInfo>
 #include <QTimer>
+#include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+#include <dbghelp.h>
+#endif
+
+namespace {
+#ifdef _WIN32
+std::wstring crashFolder;
+LONG WINAPI crashReport(EXCEPTION_POINTERS *exception) {
+    // Leave something to look at: the exception in the log and a small dump next to it.
+    char line[128];
+    std::snprintf(line, sizeof(line), "crash: exception 0x%08lX at %p", exception->ExceptionRecord->ExceptionCode,
+                  exception->ExceptionRecord->ExceptionAddress);
+    framecast::logLine(line);
+    const auto path = crashFolder + L"\\framecast-crash.dmp";
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), exception, FALSE};
+        MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, MiniDumpNormal, &info, nullptr, nullptr);
+        CloseHandle(file);
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+void installCrashReport(const QString &folder) {
+    crashFolder = QDir::toNativeSeparators(folder).toStdWString();
+    SetUnhandledExceptionFilter(crashReport);
+}
+#else
+void installCrashReport(const QString &) {}
+#endif
+} // namespace
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
@@ -16,6 +49,11 @@ int main(int argc, char **argv) {
     parser.addOption({"size", "Window dimensions for screenshot verification.", "WIDTHxHEIGHT", "1440x900"});
     parser.addOption({"empty", "Show the startup state without starting synthetic preview."});
     parser.process(app);
+    // Screenshot runs are automated checks; a person's session gets a log they can send when something breaks.
+    if (!parser.isSet("screenshot")) {
+        const auto log = framecast::ui::startSessionLog(FRAMECAST_VERSION);
+        installCrashReport(QFileInfo(log).absolutePath());
+    }
     framecast::ui::UiOptions options;
     options.synthetic = parser.isSet("synthetic");
     options.persistent = !parser.isSet("screenshot");

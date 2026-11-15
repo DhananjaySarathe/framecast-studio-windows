@@ -1,5 +1,8 @@
 #include "studio_model.hpp"
 #include <QColor>
+#include <QDateTime>
+#include <QDir>
+#include <QStandardPaths>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRadialGradient>
@@ -124,6 +127,60 @@ std::vector<SceneEntry> defaultScenes() {
                      screen({mv, .60, 1 - 2 * mv, .30})}}});
     return out;
 }
+QString logDirectory() {
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)).filePath("logs");
+}
+QString startSessionLog(const QString &version) {
+    QDir directory(logDirectory());
+    directory.mkpath(".");
+    const auto old = directory.entryList({"framecast-*.log"}, QDir::Files, QDir::Name);
+    for (int n = 0; n + 9 < old.size(); ++n)
+        directory.remove(old[n]);
+    const auto path =
+        directory.filePath("framecast-" + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") + ".log");
+    setLogFile(path.toStdString());
+    logLine("Framecast Studio Windows " + version.toStdString());
+    logLine(describeSystem());
+    std::string encoders = "H.264 encoders in this build:";
+    for (const auto &name : availableH264Encoders())
+        encoders += " " + name;
+    logLine(encoders);
+    return path;
+}
+UiWatchdog::UiWatchdog() : lastBeat_(hostNow()) {
+    thread_ = std::thread([this] {
+        bool reported = false;
+        while (!stop_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            const auto silent = hostNow() - lastBeat_.load();
+            if (silent > 3000000000LL && !reported) {
+                std::lock_guard lock(mutex_);
+                logLine("warning: the interface has not responded for 3 seconds; last action: " + action_);
+                reported = true;
+            } else if (silent < 1000000000LL && reported) {
+                logLine("the interface is responding again");
+                reported = false;
+            }
+        }
+    });
+}
+UiWatchdog::~UiWatchdog() {
+    stop_ = true;
+    if (thread_.joinable())
+        thread_.join();
+}
+void UiWatchdog::beat() {
+    lastBeat_ = hostNow();
+}
+void UiWatchdog::action(const QString &what) {
+    logLine("ui: " + what.toStdString());
+    std::lock_guard lock(mutex_);
+    action_ = what.toStdString();
+}
+UiWatchdog &watchdog() {
+    static UiWatchdog instance;
+    return instance;
+}
 StudioController::~StudioController() {
     stop();
     if (worker_.joinable())
@@ -149,6 +206,7 @@ bool StudioController::start(const EngineConfig &config) {
 #endif
             runEngine(config, stop_, {}, &live);
         } catch (const std::exception &e) {
+            logLine(std::string("error: the session stopped: ") + e.what());
             auto state = live.state();
             state.running = false;
             state.done = true;

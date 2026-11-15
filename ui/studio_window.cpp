@@ -845,6 +845,7 @@ OutputSpec StudioWindow::outputSpec(Canvas c, const QString &destination, bool s
             streaming};
 }
 void StudioWindow::toggleRecord() {
+    watchdog().action(recording_.empty() ? "start recording" : "stop recording");
     if (!recording_.empty()) {
         for (auto &id : recording_)
             outputs_.erase(id);
@@ -878,6 +879,7 @@ void StudioWindow::toggleRecord() {
     refresh();
 }
 void StudioWindow::toggleBroadcast() {
+    watchdog().action(broadcasting_.empty() ? "start broadcast" : "end broadcast");
     if (!broadcasting_.empty()) {
         for (auto &id : broadcasting_)
             outputs_.erase(id);
@@ -912,6 +914,7 @@ void StudioWindow::toggleBroadcast() {
 }
 
 void StudioWindow::startPreview() {
+    watchdog().action("start preview");
     outputError_.clear();
     outputs_.clear();
     controller_.live.setOutputs({});
@@ -927,6 +930,7 @@ void StudioWindow::showSources() {
                                  "Stop recording and broadcasting before changing your sources.");
         return;
     }
+    watchdog().action("open Add sources");
     QDialog dialog(this);
     dialog.setWindowTitle("Add sources");
     dialog.setMinimumWidth(450);
@@ -972,11 +976,16 @@ void StudioWindow::showSources() {
             });
             // Keep answering Windows messages while devices are listed (camera enumeration can take a second),
             // so nothing that needs this thread can wait on it and the window never shows "Not responding".
+            watchdog().action("list screens, windows and cameras");
             QApplication::setOverrideCursor(Qt::WaitCursor);
             while (listing.wait_for(std::chrono::milliseconds(15)) != std::future_status::ready)
                 QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
             QApplication::restoreOverrideCursor();
             auto choices = listing.get();
+            watchdog().action(QString("listed %1 displays, %2 windows, %3 cameras")
+                                  .arg(choices.monitors.size())
+                                  .arg(choices.windows.size())
+                                  .arg(choices.cameras.size()));
             for (auto &d : choices.monitors) {
                 screen->addItem(QString::fromStdString(d.name), QVariant::fromValue(qulonglong(d.id)));
                 screen->setItemData(screen->count() - 1, "monitor", Qt::UserRole + 1);
@@ -989,6 +998,7 @@ void StudioWindow::showSources() {
             for (auto &d : choices.cameras)
                 cameras->addItem(QString::fromStdString(d.name), int(d.id));
         } catch (const std::exception &e) {
+            logLine(std::string("warning: listing sources failed: ") + e.what());
             col->addWidget(label(QString::fromUtf8(e.what()), "muted"));
         }
 #else
@@ -1091,6 +1101,13 @@ void StudioWindow::showSettings() {
     col->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    auto *logs = button("Open logs folder", "folder");
+    logs->setToolTip("Framecast writes a log of each session. Send the newest file when reporting a problem.");
+    col->addWidget(logs);
+    connect(logs, &QPushButton::clicked, &dialog, [] {
+        QDir().mkpath(logDirectory());
+        QDesktopServices::openUrl(QUrl::fromLocalFile(logDirectory()));
+    });
     if (dialog.exec() == QDialog::Accepted && !folder->text().trimmed().isEmpty()) {
         recordDirectory_ = folder->text().trimmed();
         container_ = container->currentText();
@@ -1204,6 +1221,7 @@ void StudioWindow::showDestinations() {
 }
 
 void StudioWindow::refresh() {
+    watchdog().beat();
     controller_.collect();
     last_ = controller_.live.state();
     horizontal_->preview = vertical_->preview = previewMode_;
@@ -1343,6 +1361,21 @@ void StudioWindow::refresh() {
         notice_->hide();
         health_->setText("Saving files…");
         health_->setStyleSheet("color:#A8AFBF;");
+    } else if (last_.running && !last_.warnings.empty()) {
+        // A source is missing but the show goes on; the engine keeps retrying it.
+        QStringList warnings;
+        for (const auto &warning : last_.warnings)
+            warnings << QString::fromStdString(warning);
+        notice_->setText(warnings.join("\n") + "\nEverything else keeps running. Framecast retries every few seconds.");
+        notice_->show();
+        health_->setText("Check sources");
+        health_->setStyleSheet("color:#F5B544;");
+    } else if (last_.running && dropped > 0 && !recording_.empty()) {
+        notice_->setText("This computer cannot encode every frame, so some are being skipped. Sound is unaffected. "
+                         "A smaller canvas size in Settings will help.");
+        notice_->show();
+        health_->setText("Skipping frames");
+        health_->setStyleSheet("color:#F5B544;");
     } else if (last_.running) {
         notice_->hide();
         health_->setText("All good");
@@ -1413,6 +1446,7 @@ void StudioWindow::restore() {
     selected_ = stage_ == 1 ? programV_ : programH_;
 }
 void StudioWindow::closeEvent(QCloseEvent *event) {
+    watchdog().action("close window");
     if (controller_.busy()) {
         if (!closing_ && hasPendingOutputs() &&
             QMessageBox::question(this, "End this show?",
