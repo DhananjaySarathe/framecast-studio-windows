@@ -959,17 +959,24 @@ void StudioWindow::showSources() {
             std::vector<CaptureChoice> monitors, windows, cameras;
         };
         try {
-            auto choices = std::async(std::launch::async, [] {
-                               initializeWindowsMedia();
-                               try {
-                                   Choices c{listMonitors(), listWindows(), listCameras()};
-                                   shutdownWindowsMedia();
-                                   return c;
-                               } catch (...) {
-                                   shutdownWindowsMedia();
-                                   throw;
-                               }
-                           }).get();
+            auto listing = std::async(std::launch::async, [] {
+                initializeWindowsMedia();
+                try {
+                    Choices c{listMonitors(), listWindows(), listCameras()};
+                    shutdownWindowsMedia();
+                    return c;
+                } catch (...) {
+                    shutdownWindowsMedia();
+                    throw;
+                }
+            });
+            // Keep answering Windows messages while devices are listed (camera enumeration can take a second),
+            // so nothing that needs this thread can wait on it and the window never shows "Not responding".
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            while (listing.wait_for(std::chrono::milliseconds(15)) != std::future_status::ready)
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+            QApplication::restoreOverrideCursor();
+            auto choices = listing.get();
             for (auto &d : choices.monitors) {
                 screen->addItem(QString::fromStdString(d.name), QVariant::fromValue(qulonglong(d.id)));
                 screen->setItemData(screen->count() - 1, "monitor", Qt::UserRole + 1);
@@ -1219,13 +1226,20 @@ void StudioWindow::refresh() {
     meters_[0]->setLevel(last_.microphone);
     meters_[1]->setLevel(last_.desktop);
     meters_[2]->setLevel(last_.master);
-    if (++refreshCount_ % 10 == 0 && !last_.sources.empty())
+    if (++refreshCount_ % 10 == 1) {
+        // Live sources once capture runs; drawn stand-ins until then, and for a source that isn't selected,
+        // so every scene shows its layout instead of an empty box.
+        auto sources = last_.sources;
+        for (const auto &[name, image] : placeholderSources())
+            if (!sources[name])
+                sources[name] = image;
         for (size_t n = 0; n < sceneButtons_.size(); ++n) {
             auto image = compose(scenes_[n].scene, canvas_ == 0 ? Canvas::horizontal : Canvas::vertical,
-                                 canvas_ == 0 ? 320 : 180, canvas_ == 0 ? 180 : 320, last_.sources);
+                                 canvas_ == 0 ? 320 : 180, canvas_ == 0 ? 180 : 320, sources);
             sceneButtons_[n]->thumbnail = imageFor(std::make_shared<Image>(std::move(image)));
             sceneButtons_[n]->update();
         }
+    }
     QStringList errors;
     uint64_t dropped = 0;
     bool reconnecting = false, outputsChanged = false;

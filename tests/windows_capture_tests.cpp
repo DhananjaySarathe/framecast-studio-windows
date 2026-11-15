@@ -5,6 +5,8 @@
 #include <QTimer>
 #include <QWidget>
 #include <chrono>
+#include <cstdlib>
+#include <future>
 #include <iostream>
 #include <thread>
 
@@ -24,6 +26,22 @@ int main(int argc, char **argv) {
     window.resize(640, 360);
     window.show();
     const auto handle = static_cast<uintptr_t>(window.winId());
+    app.processEvents();
+    {
+        // The Add dialog lists windows on a worker while the UI thread waits. With this test's window owned by
+        // the waiting thread, the old listing sent it WM_GETTEXT and never returned.
+        auto listing = std::async(std::launch::async, [] { return framecast::listWindows(); });
+        if (listing.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
+            std::cerr << "FAIL window listing deadlocked while the UI thread waited\n";
+            std::_Exit(1);
+        }
+        for (const auto &choice : listing.get())
+            if (choice.id == handle) {
+                std::cerr << "FAIL window listing offered Framecast's own window\n";
+                return 1;
+            }
+        std::cout << "PASS window listing returns while the UI thread waits, without Framecast's own windows\n";
+    }
     std::atomic<bool> done{false};
     bool red = false, green = false, blue = false;
     std::string error;

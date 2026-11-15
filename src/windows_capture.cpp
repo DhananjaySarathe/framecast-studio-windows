@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <future>
+#include <iterator>
 #include <thread>
 
 namespace framecast {
@@ -328,10 +329,16 @@ std::string utf8(const wchar_t* value) {
     return out;
 }
 BOOL CALLBACK windowCallback(HWND window, LPARAM parameter) {
-    if (!IsWindowVisible(window) || GetWindowTextLengthW(window) == 0 || GetWindow(window,GW_OWNER)) return TRUE;
-    std::wstring title(static_cast<size_t>(GetWindowTextLengthW(window))+1, L'\0');
-    GetWindowTextW(window,title.data(),static_cast<int>(title.size()));
-    reinterpret_cast<std::vector<CaptureChoice>*>(parameter)->push_back({reinterpret_cast<uintptr_t>(window),utf8(title.c_str())});
+    // Never send window messages from here. The studio lists windows on a worker thread while its UI thread
+    // waits: GetWindowTextLength/GetWindowText send WM_GETTEXT(LENGTH) to Framecast's own windows (and
+    // GetWindowTextLength to every window), so the UI thread, or any hung app, froze the Add dialog forever.
+    // InternalGetWindowText reads the stored title without a message. Framecast's own windows are skipped.
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    if (process == GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER)) return TRUE;
+    wchar_t title[512] = {};
+    if (InternalGetWindowText(window, title, static_cast<int>(std::size(title))) <= 0) return TRUE;
+    reinterpret_cast<std::vector<CaptureChoice>*>(parameter)->push_back({reinterpret_cast<uintptr_t>(window), utf8(title)});
     return TRUE;
 }
 }
