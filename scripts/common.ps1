@@ -1,4 +1,7 @@
 $ErrorActionPreference = "Stop"
+# A Windows PowerShell child can inherit PowerShell 7's module search path.
+# Prefer this process's built-in modules for hashing and ZIP packaging.
+$env:PSModulePath = (Join-Path $PSHOME "Modules") + [IO.Path]::PathSeparator + $env:PSModulePath
 function Invoke-Checked {
     param([Parameter(Mandatory=$true)][string]$File, [string[]]$Arguments)
     & $File @Arguments
