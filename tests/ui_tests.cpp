@@ -161,6 +161,44 @@ int main(int argc, char **argv) {
         window.controller().stop();
         require(waitFor([&] { return window.controller().live.state().done; }),
                 "studio shuts down the capture thread");
+        // Owner report on a real laptop: Record pressed with no preview opened Add and never recorded.
+        window.findChild<QPushButton *>("record")->click();
+        const bool queued = waitFor(
+            [&] {
+                auto s = window.controller().live.state();
+                return s.running && std::count_if(s.outputs.begin(), s.outputs.end(), [](auto &o) {
+                                        return !o.streaming && o.state == "live" && o.frames > 10;
+                                    }) == 2;
+            },
+            12000);
+        if (!queued) {
+            auto s = window.controller().live.state();
+            std::cout << "running=" << s.running << " done=" << s.done << " frame=" << s.frame
+                      << " busy=" << window.controller().busy() << " error=" << s.error << " record button='"
+                      << window.findChild<QPushButton *>("record")->text().toStdString() << "'\n";
+            for (auto &o : s.outputs)
+                std::cout << "output " << o.id << ' ' << o.state << " frames=" << o.frames << ' ' << o.error << '\n';
+        }
+        require(queued, "Record with the preview stopped starts the preview and records both canvases");
+        window.findChild<QPushButton *>("record")->click();
+        const bool finalized = waitFor(
+            [&] {
+                auto s = window.controller().live.state();
+                return QDir(files.path()).entryList({"*.mkv"}, QDir::Files).size() == 4 &&
+                       std::all_of(s.outputs.begin(), s.outputs.end(),
+                                   [](auto &o) { return o.state == "stopped"; });
+            },
+            12000);
+        if (!finalized) {
+            std::cout << "mkv files: " << QDir(files.path()).entryList({"*.mkv"}, QDir::Files).join(", ").toStdString()
+                      << '\n';
+            for (auto &o : window.controller().live.state().outputs)
+                std::cout << "output " << o.id << ' ' << o.state << " frames=" << o.frames << ' ' << o.error << '\n';
+        }
+        require(finalized, "the queued recording finalizes both files");
+        window.controller().stop();
+        require(waitFor([&] { return window.controller().live.state().done; }),
+                "studio shuts down after the queued recording");
         window.close();
     } catch (const std::exception &e) {
         std::cerr << e.what() << '\n';

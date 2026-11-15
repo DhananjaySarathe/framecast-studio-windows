@@ -89,6 +89,9 @@ public:
     virtual ~VideoCapture() = default;
     virtual void poll() = 0;
     virtual std::shared_ptr<const Image> at(Nanoseconds timestamp) = 0;
+    // A condition worth telling the presenter about that is not a failure (a minimised window, a camera
+    // that stopped sending pictures). Empty when all is well.
+    virtual std::string notice() { return {}; }
 };
 // Audio capture heals itself: it keeps retrying its device in the background and never stops a session.
 // problem() is empty while audio flows, otherwise a sentence for the person at the studio.

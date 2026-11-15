@@ -33,6 +33,13 @@
 #include <QUrl>
 #include <QUuid>
 #include <future>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <wincred.h>
+#endif
 
 namespace framecast::ui {
 namespace {
@@ -145,6 +152,47 @@ QMenu::item {padding:7px 18px;}
 QMenu::item:selected {background:#262C3A;}
 QToolTip {background:#262C3A;color:#EEF0F6;border:1px solid #3B4253;padding:6px;}
 )";
+// Stream keys live in Windows Credential Manager (the Mac app uses the Keychain), never in settings or logs.
+QString credentialTarget(const QString &server, const QString &name) {
+    return "Framecast Studio/stream key/" + name + "/" + server;
+}
+void storeStreamKey(const QString &server, const QString &name, const QString &key) {
+#ifdef _WIN32
+    const auto target = credentialTarget(server, name).toStdWString();
+    if (key.isEmpty()) {
+        CredDeleteW(target.c_str(), CRED_TYPE_GENERIC, 0);
+        return;
+    }
+    const auto secret = key.toUtf8();
+    CREDENTIALW credential{};
+    credential.Type = CRED_TYPE_GENERIC;
+    credential.TargetName = const_cast<wchar_t *>(target.c_str());
+    credential.CredentialBlobSize = DWORD(secret.size());
+    credential.CredentialBlob = reinterpret_cast<LPBYTE>(const_cast<char *>(secret.data()));
+    credential.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    static wchar_t user[] = L"Framecast Studio";
+    credential.UserName = user;
+    if (!CredWriteW(&credential, 0))
+        logLine("warning: a stream key could not be saved in Windows Credential Manager (error " +
+                std::to_string(GetLastError()) + "); it is kept for this session only");
+#else
+    (void)server, (void)name, (void)key;
+#endif
+}
+QString loadStreamKey(const QString &server, const QString &name) {
+#ifdef _WIN32
+    PCREDENTIALW credential = nullptr;
+    if (!CredReadW(credentialTarget(server, name).toStdWString().c_str(), CRED_TYPE_GENERIC, 0, &credential))
+        return {};
+    auto key = QString::fromUtf8(reinterpret_cast<const char *>(credential->CredentialBlob),
+                                 int(credential->CredentialBlobSize));
+    CredFree(credential);
+    return key;
+#else
+    (void)server, (void)name;
+    return {};
+#endif
+}
 } // namespace
 
 StudioWindow::StudioWindow(UiOptions options)
@@ -844,6 +892,13 @@ OutputSpec StudioWindow::outputSpec(Canvas c, const QString &destination, bool s
             6000,
             streaming};
 }
+bool StudioWindow::previewRunning() {
+    // Read the engine now, not last_ (refreshed every 50 ms): a click just after the preview stopped
+    // otherwise registered outputs with a session that had ended and left Record stuck on "Stop recording".
+    controller_.collect();
+    last_ = controller_.live.state();
+    return controller_.busy() && last_.running;
+}
 void StudioWindow::toggleRecord() {
     watchdog().action(recording_.empty() ? "start recording" : "stop recording");
     if (!recording_.empty()) {
@@ -853,8 +908,8 @@ void StudioWindow::toggleRecord() {
         record_->setEnabled(false);
         return;
     }
-    if (!last_.running) {
-        showSources();
+    if (!previewRunning()) {
+        startForOutput(PendingOutput::record);
         return;
     }
     outputError_.clear();
@@ -887,8 +942,8 @@ void StudioWindow::toggleBroadcast() {
         broadcast_->setEnabled(false);
         return;
     }
-    if (!last_.running) {
-        showSources();
+    if (!previewRunning()) {
+        startForOutput(PendingOutput::broadcast);
         return;
     }
     if (destinations_.empty() ||
@@ -923,6 +978,22 @@ void StudioWindow::startPreview() {
     controller_.start(config_);
     notice_->setText("Starting your sources…");
     notice_->show();
+}
+void StudioWindow::startForOutput(PendingOutput output) {
+    // Owner report: pressing Record with no preview opened Add, and after Start preview nothing recorded.
+    // Now the press is remembered and the output begins once the preview is live.
+    pendingOutput_ = output;
+    watchdog().action(output == PendingOutput::record ? "record requested before preview"
+                                                      : "broadcast requested before preview");
+    if (controller_.busy() || restartPending_)
+        return; // refresh() starts the output when the preview is ready
+    if (sourcesChosen_ || options_.synthetic) {
+        startPreview();
+        return;
+    }
+    showSources();
+    if (!controller_.busy() && !restartPending_)
+        pendingOutput_ = PendingOutput::none; // Add was cancelled
 }
 void StudioWindow::showSources() {
     if (hasPendingOutputs()) {
@@ -1027,15 +1098,33 @@ void StudioWindow::showSources() {
     col->addWidget(buttons);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    if (controller_.busy()) {
+    const bool live = controller_.busy();
+    if (live) {
+        // Owner report: Add was opened five times during a preview and the camera never joined, because
+        // Start preview was disabled here. Now the preview restarts with the new sources.
         auto *stop = button("Stop preview");
         col->addWidget(stop);
         connect(stop, &QPushButton::clicked, &dialog, [this, &dialog] {
+            pendingOutput_ = PendingOutput::none;
             controller_.stop();
             dialog.reject();
         });
-        start->setEnabled(false);
-        desc->setText("Stop preview before changing capture devices. Your scene layouts will be kept.");
+        start->setText("Switch sources");
+        desc->setText("The preview restarts with these sources in a moment. Your scene layouts are kept.");
+    }
+    // Select the sources in use, so opening Add and pressing the button keeps what is running.
+    for (int n = 0; n < screen->count(); ++n) {
+        const bool window = screen->itemData(n, Qt::UserRole + 1).toString() == "window";
+        if ((config_.windowHandle && window && screen->itemData(n).toULongLong() == config_.windowHandle) ||
+            (!config_.windowHandle && !window && screen->itemData(n).toInt() == config_.monitor)) {
+            screen->setCurrentIndex(n);
+            break;
+        }
+    }
+    if (config_.camera) {
+        const int found = cameras->findData(config_.cameraIndex);
+        if (found >= 0)
+            cameras->setCurrentIndex(found);
     }
     if (dialog.exec() != QDialog::Accepted)
         return;
@@ -1049,6 +1138,16 @@ void StudioWindow::showSources() {
     config_.cameraIndex = std::max(0, cameras->currentData().toInt());
     config_.microphone = mic->isChecked();
     config_.desktopAudio = desktop->isChecked();
+    sourcesChosen_ = true;
+    persist();
+    if (controller_.busy()) {
+        watchdog().action("switch sources: restarting preview");
+        restartPending_ = true;
+        controller_.stop();
+        notice_->setText("Switching sources…");
+        notice_->show();
+        return;
+    }
     startPreview();
 }
 
@@ -1129,7 +1228,8 @@ void StudioWindow::showDestinations() {
     col->setSpacing(14);
     col->addWidget(label("Broadcast destinations", "title"));
     auto *note =
-        label("Add an RTMP or RTMPS destination. Stream keys stay in memory for this session.", "muted");
+        label("Add an RTMP or RTMPS destination. Stream keys are stored in Windows Credential Manager, never in "
+              "settings or logs.", "muted");
     note->setWordWrap(true);
     col->addWidget(note);
     auto *list = new QListWidget;
@@ -1203,6 +1303,7 @@ void StudioWindow::showDestinations() {
         int n = list->currentRow();
         if (n < 0)
             return;
+        storeStreamKey(destinations_[n].server, destinations_[n].name, {});
         destinations_.erase(destinations_.begin() + n);
         delete list->takeItem(n);
     });
@@ -1212,6 +1313,9 @@ void StudioWindow::showDestinations() {
             destinations_[n].enabled = item->checkState() == Qt::Checked;
     });
     dialog.exec();
+    for (const auto &d : destinations_)
+        storeStreamKey(d.server, d.name, d.key);
+    persist();
     destinationsButton_->setText(
         destinations_.empty() ? "Destinations"
                               : "Destinations · " +
@@ -1281,8 +1385,15 @@ void StudioWindow::refresh() {
         broadcasting_.clear();
         controller_.live.setOutputs({});
     }
+    if (last_.done && !controller_.busy() && !outputs_.empty()) {
+        // The session ended (Stop preview, or an error): it finalized every output it had, so none is
+        // still pending, and Record/Start broadcast must not stay on "Stop".
+        outputs_.clear();
+        recording_.clear();
+        broadcasting_.clear();
+    }
     bool startingOutput = false, finishingOutput = false;
-    auto group = [this, &startingOutput, &finishingOutput](auto &ids, auto *action, auto *status,
+    auto group =[this, &startingOutput, &finishingOutput](auto &ids, auto *action, auto *status,
                                                            const QString &idle) {
         const bool isRecord = idle == "Record";
         if (!ids.empty() && !groupPending(ids)) {
@@ -1396,6 +1507,28 @@ void StudioWindow::refresh() {
                           ? "Test sources · " + QString::number(config_.fps) + " fps"
                       : last_.running ? QString::number(config_.fps) + " fps"
                                       : "");
+    if (!closing_) {
+        if (restartPending_ && !controller_.busy()) {
+            restartPending_ = false;
+            startPreview();
+        } else if (pendingOutput_ != PendingOutput::none) {
+            if (!last_.error.empty() && !controller_.busy()) {
+                pendingOutput_ = PendingOutput::none; // the preview failed; its error is on screen
+            } else if (last_.running && last_.frame >= config_.fps) {
+                // One second of preview first, so the encoder test has settled before the output's first frame.
+                const auto output = pendingOutput_;
+                pendingOutput_ = PendingOutput::none;
+                output == PendingOutput::record ? toggleRecord() : toggleBroadcast();
+            } else if (!controller_.busy() && !restartPending_) {
+                startPreview(); // Record was pressed while an earlier preview was still stopping
+            } else {
+                notice_->setText(pendingOutput_ == PendingOutput::record
+                                     ? "Starting your sources. Recording begins in a moment…"
+                                     : "Starting your sources. The broadcast begins in a moment…");
+                notice_->show();
+            }
+        }
+    }
     if (closing_ && !controller_.busy()) {
         persist();
         close();
@@ -1418,6 +1551,25 @@ void StudioWindow::persist() {
     settings_.setValue("stage", stage_);
     settings_.setValue("programH", programH_);
     settings_.setValue("programV", programV_);
+    // Canvas and sources were forgotten on every launch; Settings looked as if it did nothing.
+    settings_.setValue("canvasWidth", config_.width);
+    settings_.setValue("canvasHeight", config_.height);
+    settings_.setValue("fps", config_.fps);
+    settings_.setValue("sourcesChosen", sourcesChosen_);
+    // A window handle means nothing after a restart; the display is remembered instead.
+    settings_.setValue("monitor", config_.monitor);
+    settings_.setValue("camera", config_.camera);
+    settings_.setValue("cameraIndex", config_.cameraIndex);
+    settings_.setValue("microphone", config_.microphone);
+    settings_.setValue("desktopAudio", config_.desktopAudio);
+    // Destinations without their stream keys: keys are never written to settings or logs.
+    QJsonArray destinations;
+    for (const auto &d : destinations_)
+        destinations.append(QJsonObject{{"name", d.name},
+                                        {"server", d.server},
+                                        {"canvas", d.canvas == Canvas::horizontal ? "16:9" : "9:16"},
+                                        {"enabled", d.enabled}});
+    settings_.setValue("destinations", QJsonDocument(destinations).toJson(QJsonDocument::Compact));
     settings_.sync();
 }
 void StudioWindow::restore() {
@@ -1444,6 +1596,32 @@ void StudioWindow::restore() {
     programH_ = std::clamp(settings_.value("programH", 3).toInt(), 0, int(scenes_.size()) - 1);
     programV_ = std::clamp(settings_.value("programV", 3).toInt(), 0, int(scenes_.size()) - 1);
     selected_ = stage_ == 1 ? programV_ : programH_;
+    const int width = settings_.value("canvasWidth", config_.width).toInt();
+    const int height = settings_.value("canvasHeight", config_.height).toInt();
+    if ((width == 1920 && height == 1080) || (width == 1280 && height == 720)) {
+        config_.width = width;
+        config_.height = height;
+    }
+    const int fps = settings_.value("fps", config_.fps).toInt();
+    if (fps == 24 || fps == 25 || fps == 29 || fps == 30 || fps == 60)
+        config_.fps = fps;
+    sourcesChosen_ = settings_.value("sourcesChosen", false).toBool();
+    config_.monitor = std::max(0, settings_.value("monitor", 0).toInt());
+    config_.windowHandle = 0;
+    config_.camera = settings_.value("camera", false).toBool();
+    config_.cameraIndex = std::max(0, settings_.value("cameraIndex", 0).toInt());
+    config_.microphone = settings_.value("microphone", config_.microphone).toBool();
+    config_.desktopAudio = settings_.value("desktopAudio", config_.desktopAudio).toBool();
+    destinations_.clear();
+    for (auto value : QJsonDocument::fromJson(settings_.value("destinations").toByteArray()).array()) {
+        auto o = value.toObject();
+        if (o["server"].toString().isEmpty() || destinations_.size() >= 16)
+            continue;
+        const auto name = o["name"].toString().left(80), server = o["server"].toString();
+        destinations_.push_back({name, server, loadStreamKey(server, name),
+                                 o["canvas"].toString() == "9:16" ? Canvas::vertical : Canvas::horizontal,
+                                 o["enabled"].toBool(true)});
+    }
 }
 void StudioWindow::closeEvent(QCloseEvent *event) {
     watchdog().action("close window");

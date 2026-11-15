@@ -21,7 +21,8 @@ class SceneButton;
 class Meter;
 struct UiOptions {
     bool synthetic = false, persistent = true;
-    int width = 1280, height = 720;
+    // Full HD by default: hardware encoders handle it, and without one the encoder records at 720p itself.
+    int width = 1920, height = 1080;
     bool autoStart = true;
 };
 class StudioWindow final : public QMainWindow {
@@ -57,6 +58,13 @@ class StudioWindow final : public QMainWindow {
     int programH_ = 3, programV_ = 3, selected_ = 3, canvas_ = 0, stage_ = 2;
     int previewH_ = 3, previewV_ = 3;
     bool previewMode_ = false, updatingLayer_ = false, closing_ = false;
+    // Record or Start broadcast pressed before the preview was running: start the preview (asking for
+    // sources first if none were ever chosen) and begin that output as soon as the preview is live.
+    enum class PendingOutput { none, record, broadcast } pendingOutput_ = PendingOutput::none;
+    // New sources chosen while the preview runs: the preview stops and restarts with them.
+    bool restartPending_ = false;
+    // Sources have been chosen at least once (kept between launches), so Record can start without asking.
+    bool sourcesChosen_ = false;
     QString recordDirectory_, container_ = "mkv";
     std::map<std::string, OutputSpec> outputs_;
     std::vector<std::string> recording_, broadcasting_;
@@ -100,6 +108,8 @@ class StudioWindow final : public QMainWindow {
     void showSettings();
     void showDestinations();
     void startPreview();
+    void startForOutput(PendingOutput output);
+    bool previewRunning();
     void publishScenes();
     void publishGains();
     void refresh();

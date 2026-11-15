@@ -45,7 +45,11 @@ public:
         try { return source_->at(time); }
         catch (const std::exception& e) { fail(name_ + " stopped: " + e.what(), now); return nullptr; }
     }
-    const std::string& problem() const { return problem_; }
+    // The failure, or else the open source's notice (a minimised window, a camera without pictures).
+    std::string problem() const {
+        if (!problem_.empty() || !source_) return problem_;
+        try { return source_->notice(); } catch (...) { return {}; }
+    }
     void close() { source_.reset(); }
 private:
     void fail(const std::string& what, Nanoseconds now) {
@@ -224,11 +228,18 @@ int runEngine(const EngineConfig& cfg, std::atomic<bool>& stop,
         }
         if (frame%10 == 0 && !cfg.synthetic) {
             std::vector<std::string> warnings = audioSetupProblems;
-            for (const auto* slot : {&screen, &camera}) if (!slot->problem().empty()) warnings.push_back(slot->problem());
+            for (const auto* slot : {&screen, &camera}) {
+                if (slot == &camera && !cfg.camera) continue;
+                auto problem = slot->problem();
+                if (!problem.empty()) warnings.push_back(std::move(problem));
+            }
             for (auto& input : audioInputs) { auto problem = input->problem(); if (!problem.empty()) warnings.push_back(std::move(problem)); }
             if (warnings != state.warnings) {
                 if (!live) for (const auto& warning : warnings) std::cerr << "warning: " << warning << '\n';
                 if (warnings.empty()) logLine("all sources working");
+                for (const auto& warning : warnings)
+                    if (std::find(state.warnings.begin(), state.warnings.end(), warning) == state.warnings.end())
+                        logLine("source notice: " + warning);
                 state.warnings = std::move(warnings);
             }
         }

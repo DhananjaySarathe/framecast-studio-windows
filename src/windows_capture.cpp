@@ -64,6 +64,7 @@ class ScreenCapture final : public VideoCapture {
     Direct3D11CaptureFrame pending_{nullptr};
     Nanoseconds minInterval_ = 0, lastReadback_ = INT64_MIN/2;
     UINT stagingWidth_ = 0, stagingHeight_ = 0;
+    HWND window_ = nullptr;
 public:
     ScreenCapture(int index, uintptr_t window, int fps) : minInterval_(1000000000LL*2/(3*std::max(1, fps))) {
         if (!GraphicsCaptureSession::IsSupported()) throw std::runtime_error("Windows Graphics Capture is unavailable");
@@ -80,6 +81,7 @@ public:
         if (window) {
             HWND hwnd = reinterpret_cast<HWND>(window);
             if (!IsWindow(hwnd)) throw std::runtime_error("Capture window does not exist");
+            window_ = hwnd;
             hr(interop->CreateForWindow(hwnd, winrt::guid_of<GraphicsCaptureItem>(), winrt::put_abi(item_)), "Capture selected window");
         } else {
             std::vector<HMONITOR> monitors;
@@ -158,6 +160,11 @@ public:
         // WGC can stop delivering frames on an unchanged desktop. That is not source loss.
         return history_.at(time, false);
     }
+    std::string notice() override {
+        // A minimised window sends no pictures; the last one stays on screen until it is restored.
+        if (window_ && IsIconic(window_)) return "The captured window is minimised. Restore it to show it live.";
+        return {};
+    }
 };
 
 struct CameraState {
@@ -165,6 +172,9 @@ struct CameraState {
     std::mutex mutex;
     std::string error;
     bool stopping = false;
+    // When the reader opened and when the last picture arrived. Virtual cameras (phone apps such as Iriun)
+    // stay "connected" and send nothing when the phone goes away, so silence must be noticed, not an error.
+    Nanoseconds opened = 0, lastFrame = 0;
     int width = 0, height = 0;
     LONG stride = 0;
     ComPtr<IMFSourceReader> reader;
@@ -218,6 +228,7 @@ public:
                 // Media Foundation RGB32 is BGRX, not premultiplied alpha.
                 for (size_t p = 3; p < image->bgra.size(); p += 4) image->bgra[p] = 255;
                 s.history.push({timestamp, std::move(image)});
+                s.lastFrame = timestamp;
             }
             hr(s.reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr), "Request camera frame");
         } catch (const std::exception& e) { s.error = e.what(); }
@@ -274,6 +285,7 @@ public:
             else hr(MFGetStrideForBitmapInfoHeader(MFVideoFormat_RGB32.Data1, w, &state_->stride), "Read camera stride");
             hr(state_->reader->SetStreamSelection(MF_SOURCE_READER_ALL_STREAMS, FALSE), "Disable camera audio");
             hr(state_->reader->SetStreamSelection(MF_SOURCE_READER_FIRST_VIDEO_STREAM, TRUE), "Enable camera video");
+            state_->opened = hostNow();
             hr(state_->reader->ReadSample(MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, nullptr, nullptr, nullptr, nullptr), "Start camera");
         } catch (...) { close(); throw; }
     }
@@ -286,6 +298,13 @@ public:
     ~CameraCapture() override { close(); }
     void poll() override { std::lock_guard lock(state_->mutex); if (!state_->error.empty()) throw std::runtime_error(state_->error); }
     std::shared_ptr<const Image> at(Nanoseconds time) override { poll(); return state_->history.at(time); }
+    std::string notice() override {
+        std::lock_guard lock(state_->mutex);
+        const Nanoseconds since = state_->lastFrame ? state_->lastFrame : state_->opened;
+        if (!since || hostNow() - since < 3000000000LL) return {};
+        return "The camera is connected but not sending pictures. For a phone camera, check that its app is open "
+               "and connected.";
+    }
 };
 
 class WasapiCapture final : public AudioCapture {
@@ -403,15 +422,18 @@ BOOL CALLBACK windowCallback(HWND window, LPARAM parameter) {
     DWORD process = 0;
     GetWindowThreadProcessId(window, &process);
     if (process == GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER)) return TRUE;
-    // Minimised windows cannot be captured; tool windows and "cloaked" windows (background store apps,
-    // windows on another virtual desktop) only clutter the list.
-    if (IsIconic(window) || (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) ||
+    // Tool windows and "cloaked" windows (background store apps, windows on another virtual desktop) only
+    // clutter the list. Minimised windows are listed: on a real laptop most apps sit minimised behind the
+    // studio, and hiding them left one or two entries. Capture shows their last picture and a notice until
+    // they are restored.
+    if ((GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) ||
         (GetWindowLongPtrW(window, GWL_STYLE) & WS_CHILD)) return TRUE;
     DWORD cloaked = 0;
     if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked) return TRUE;
     wchar_t title[512] = {};
     if (InternalGetWindowText(window, title, static_cast<int>(std::size(title))) <= 0) return TRUE;
-    reinterpret_cast<std::vector<CaptureChoice>*>(parameter)->push_back({reinterpret_cast<uintptr_t>(window), utf8(title)});
+    reinterpret_cast<std::vector<CaptureChoice>*>(parameter)->push_back(
+        {reinterpret_cast<uintptr_t>(window), utf8(title) + (IsIconic(window) ? " (minimised)" : "")});
     return TRUE;
 }
 }
