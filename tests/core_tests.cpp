@@ -38,6 +38,30 @@ int main() {
         auto layout = screenCameraScene();
         check(layout.horizontal.size() == 2 && layout.vertical.size() == 2 && layout.vertical[1].rect.y == .44,
               "screen plus camera preserves separate Mac canvas geometry");
+        {
+            // A mapped capture buffer: rows are further apart than the picture is wide.
+            const int w = 6, h = 4; const size_t pitch = 40;
+            std::vector<uint8_t> mapped(pitch*h, 0xEE);
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) for (int c = 0; c < 4; ++c)
+                mapped[y*pitch + x*4 + c] = static_cast<uint8_t>(y*10 + x + c);
+            auto copy = copyCapturedFrame(mapped.data(), pitch, w, h);
+            bool exact = copy->width == w && copy->height == h && copy->bgra.size() == size_t(w)*h*4;
+            for (int y = 0; y < h && exact; ++y) for (int x = 0; x < w; ++x) for (int c = 0; c < 4; ++c)
+                exact = exact && copy->bgra[(y*w+x)*4+c] == y*10 + x + c;
+            check(exact, "captured frames are copied row by row without the row padding");
+            // A 4K-class frame is averaged 2:1: a checkerboard of 0 and 200 becomes flat 100.
+            const int bw = 3202, bh = 4;
+            std::vector<uint8_t> big(size_t(bw)*4*bh);
+            for (int y = 0; y < bh; ++y) for (int x = 0; x < bw; ++x) for (int c = 0; c < 4; ++c)
+                big[(size_t(y)*bw + x)*4 + c] = (x+y)%2 ? 200 : 0;
+            auto half = copyCapturedFrame(big.data(), size_t(bw)*4, bw, bh);
+            bool averaged = half->width == bw/2 && half->height == bh/2;
+            for (uint8_t value : half->bgra) averaged = averaged && value == 100;
+            check(averaged, "4K-class captures are averaged down 2:1 while copying");
+            bool rejected = false;
+            try { copyCapturedFrame(mapped.data(), 8, w, h); } catch (const std::invalid_argument&) { rejected = true; }
+            check(rejected, "a capture buffer narrower than its picture is rejected");
+        }
         FrameHistory history;
         history.push({1000000000, source});
         check(!history.at(999999999), "capture history never selects a future frame");
