@@ -459,7 +459,11 @@ void OutputWorker::submit(OutputBatch batch) {
             logLine("warning: recording failed: twenty seconds of frames were waiting to be written");
             return;
         }
-        if (p.queuedPictures >= 8) {
+        // Until the encoder session and file are open, allow up to a second of pictures. On the laptop two
+        // NVENC sessions opening together took longer than eight frames, so every recording began by
+        // skipping pictures and the studio warned that the computer could not keep up.
+        const size_t pictureLimit = p.status.state == "live" ? 8 : std::max<size_t>(8, static_cast<size_t>(p.spec.fps));
+        if (p.queuedPictures >= pictureLimit) {
             batch.video.reset();
             if (p.status.dropped++ % 150 == 0)
                 logLine("warning: recording encoder is behind; skipping pictures (" + std::to_string(p.status.dropped) + " so far)");

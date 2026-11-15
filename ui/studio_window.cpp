@@ -1126,7 +1126,10 @@ void StudioWindow::showSources() {
         if (found >= 0)
             cameras->setCurrentIndex(found);
     }
-    if (dialog.exec() != QDialog::Accepted)
+    choosingSources_ = true;
+    const int answer = dialog.exec();
+    choosingSources_ = false;
+    if (answer != QDialog::Accepted)
         return;
     config_.windowHandle = 0;
     config_.monitor = 0;
@@ -1363,12 +1366,16 @@ void StudioWindow::refresh() {
         }
     }
     QStringList errors;
-    uint64_t dropped = 0;
+    uint64_t dropped = 0, recordingDropped = 0;
     bool reconnecting = false, outputsChanged = false;
     for (auto &output : last_.outputs) {
         if (!output.error.empty() && output.state == "failed" && seenFailures_.insert(output.id).second)
             outputError_ = QString::fromStdString(output.error);
         dropped += output.dropped;
+        // A stream discards the frames queued while it connects, by design; only recordings that skip
+        // pictures mean the computer is not keeping up.
+        if (!output.streaming && output.state != "stopped")
+            recordingDropped += output.dropped;
         if (output.state == "reconnecting")
             reconnecting = true;
         if (output.state == "failed" && outputs_.erase(output.id))
@@ -1475,13 +1482,18 @@ void StudioWindow::refresh() {
     } else if (last_.running && !last_.warnings.empty()) {
         // A source is missing but the show goes on; the engine keeps retrying it.
         QStringList warnings;
-        for (const auto &warning : last_.warnings)
+        bool retrying = false;
+        for (const auto &warning : last_.warnings) {
             warnings << QString::fromStdString(warning);
-        notice_->setText(warnings.join("\n") + "\nEverything else keeps running. Framecast retries every few seconds.");
+            // Failed devices are reopened; notices (a minimised window, a silent camera) clear by themselves.
+            retrying |= warning.find("unavailable") != std::string::npos || warning.find("stopped") != std::string::npos;
+        }
+        notice_->setText(warnings.join("\n") + (retrying ? "\nEverything else keeps running. Framecast retries every few seconds."
+                                                         : "\nEverything else keeps running."));
         notice_->show();
         health_->setText("Check sources");
         health_->setStyleSheet("color:#F5B544;");
-    } else if (last_.running && dropped > 0 && !recording_.empty()) {
+    } else if (last_.running && recordingDropped > 0 && !recording_.empty()) {
         notice_->setText("This computer cannot encode every frame, so some are being skipped. Sound is unaffected. "
                          "A smaller canvas size in Settings will help.");
         notice_->show();
@@ -1507,7 +1519,7 @@ void StudioWindow::refresh() {
                           ? "Test sources · " + QString::number(config_.fps) + " fps"
                       : last_.running ? QString::number(config_.fps) + " fps"
                                       : "");
-    if (!closing_) {
+    if (!closing_ && !choosingSources_) {
         if (restartPending_ && !controller_.busy()) {
             restartPending_ = false;
             startPreview();

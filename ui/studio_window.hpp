@@ -65,6 +65,9 @@ class StudioWindow final : public QMainWindow {
     bool restartPending_ = false;
     // Sources have been chosen at least once (kept between launches), so Record can start without asking.
     bool sourcesChosen_ = false;
+    // The Add dialog is open. Its event loop keeps refresh() running, which must not start a queued preview
+    // or output underneath it (seen on the laptop: the preview started before any source was picked).
+    bool choosingSources_ = false;
     QString recordDirectory_, container_ = "mkv";
     std::map<std::string, OutputSpec> outputs_;
     std::vector<std::string> recording_, broadcasting_;
