@@ -4,7 +4,7 @@ This repository contains only the Windows implementation. The Mac app lives in h
 
 ## Install on a Windows laptop
 
-Target: Windows 11 on Intel or AMD, 64-bit. Download `Framecast-Studio-Windows-0.1.1-x64-Setup.exe` from the [v0.1.1 release](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.1) and run it; it installs into your user account and adds a Start menu entry. Qt and the C++ runtime are included, so Visual Studio, Python and Qt are not needed on the laptop. The portable ZIP is an alternative: extract the entire folder and open `FramecastStudio.exe`.
+Target: Windows 11 on Intel or AMD, 64-bit. Download `Framecast-Studio-Windows-0.1.2-x64-Setup.exe` from the [v0.1.2 release](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.2) and run it; it installs into your user account and adds a Start menu entry. Qt and the C++ runtime are included, so Visual Studio, Python and Qt are not needed on the laptop. The portable ZIP is an alternative: extract the entire folder and open `FramecastStudio.exe`.
 
 This preview installer is unsigned; Windows may show an unknown-publisher or SmartScreen prompt. Use the release's `SHA256SUMS.txt` to identify the build. The application does not start capture on launch. Open **Add**, select your sources, and choose **Start preview**. Scenes and recording preferences are kept between launches; stream keys are kept only for the current session.
 

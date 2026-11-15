@@ -1,6 +1,16 @@
 # Windows qualification and migration
 
-## Current preview: 0.1.1
+## Current preview: 0.1.2
+
+0.1.2 fixes the studio falling behind real time on laptops. That showed up as hangs, a black screen and recordings failing with "Recording cannot keep up". Evidence from [Windows CI run 43713599413](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43713599413) (Windows Server 2025, MSVC v143, no GPU):
+
+- Composing both 1080p canvases took **158.8 ms** per frame with the 0.1.1 compositor, against a 33 ms frame at 30 fps. The 0.1.2 compositor takes **8.8 ms** and produces pixel-identical output (`compose-1080p`).
+- A preview followed by a landscape and a portrait recording at 1920×1080 / 1080×1920: 182 of 182 frames in each, none dropped, 0 of 225 late frames (`realtime-1080p`). No vendor encoder was available, so automatic selection used Media Foundation `h264_mf`, at about 7 ms colour conversion and 1.2 ms encode per frame.
+- The H.264 encoders in the packaged FFmpeg are `libopenh264 h264_amf h264_d3d12va h264_mf h264_nvenc h264_qsv`. OpenH264 alone could not keep two streams at 1080p30, or even 720p30, on that runner. It remains the last fallback, at 720p.
+
+Other changes: the studio monitors receive 960-wide renders instead of full-size frames. Screen readback is limited to about 1.5 times the output rate. Webcams open in a native 30 fps mode near 720p. The encoder choice is settled while the preview runs.
+
+## Previous preview: 0.1.1
 
 Qualified on 2026-11-15. The published installer and portable ZIP were built from commit `50e8dc8b6a1ab90a0b199104b8b68e2ef70dbf87` in this standalone Windows repository.
 
@@ -17,7 +27,7 @@ The command launchers were exercised through Windows PowerShell, including SDK s
 
 ## Qualification boundaries
 
-The hosted runner uses Windows Server 2025 with the v143 compiler toolset and Qt 6.8.3. The target laptop is Windows 11 Intel/AMD x64. Synthetic media checks use 640×360 / 360×640 canvases; they do not establish full-HD performance. Real webcams, microphone latency, GPU encoders and driver combinations, HDR and multiple monitors, hotplug, sleep/resume and real streaming-service RTMPS compatibility still require laptop validation. This is an unsigned developer preview, and remaining Mac feature parity is listed in ENGINE.md.
+The hosted runner uses Windows Server 2025 with the v143 compiler toolset and Qt 6.8.3. The target laptop is Windows 11 Intel/AMD x64. The media checks use 640×360 / 360×640 canvases. Full-HD timing is covered by the compose-1080p and realtime-1080p tests, with synthetic sources on a hosted runner. Real webcams, microphone latency, GPU encoders and driver combinations, HDR and multiple monitors, hotplug, sleep/resume and real streaming-service RTMPS compatibility still require laptop validation. This is an unsigned developer preview, and remaining Mac feature parity is listed in ENGINE.md.
 
 ## Migration provenance
 
