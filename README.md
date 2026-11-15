@@ -97,13 +97,6 @@ Keep runtime DLLs and plugin folders together. For distribution use the installe
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-installer.ps1 -BuildDir .\build\windows
 ```
 
-The installation smoke test uses a temporary directory and requires `RUNNER_TEMP` to be set outside CI:
-
-```powershell
-$env:RUNNER_TEMP = $env:TEMP
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-installer.ps1 -BuildDir .\build\windows
-```
-
 Synthetic tests open only loopback network listeners and generated media. The native capture test captures its own changing test window. Physical webcams, microphone latency, hotplug, HDR/multiple displays, laptop performance and a real streaming-service RTMPS endpoint require device testing. The pipeline's exact scope is explained in [validation notes](docs/VALIDATION.md).
 
 ## Folder layout

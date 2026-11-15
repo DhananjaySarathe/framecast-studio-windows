@@ -45,6 +45,7 @@ Install Visual Studio 2022 with Desktop development with C++, a recent Windows S
 ```powershell
 cmake -S . -B build/windows -A x64 `
   "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  "-DVCPKG_OVERLAY_TRIPLETS=$pwd/triplets" `
   -DVCPKG_TARGET_TRIPLET=x64-windows -DFRAMECAST_BUILD_UI=ON `
   -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64
 cmake --build build/windows --config Release --parallel
@@ -52,7 +53,7 @@ $env:PATH = "C:/Qt/6.8.3/msvc2022_64/bin;$env:PATH"
 ctest --test-dir build/windows -C Release --output-on-failure
 ```
 
-Set `VCPKG_ROOT` to your vcpkg checkout first. On GitHub-hosted Windows runners the workflow uses `VCPKG_INSTALLATION_ROOT`. The manifest requests FFmpeg libraries and the selected encoder integrations. Dependency versions currently follow the vcpkg checkout; pin its revision for reproducible release builds. FFmpeg's Windows network feature uses Schannel for TLS.
+Set `VCPKG_ROOT` to your vcpkg checkout first. On GitHub-hosted Windows runners the workflow uses `VCPKG_INSTALLATION_ROOT`. The manifest requests FFmpeg libraries and the selected encoder integrations. The manifest pins the dependency baseline. The setup helper checks out that revision and the root triplet builds Release libraries only. The supported setup/build commands are in the root README. FFmpeg's Windows network feature uses Schannel for TLS.
 
 The studio (`FramecastStudio.exe`), CLI (`framecast-engine.exe`) and runtime DLLs are under `build/windows/Release`. Keep them together. This is a developer build; signing and full Mac feature parity are later milestones. A per-user installer and portable package are built by the pipeline.
 

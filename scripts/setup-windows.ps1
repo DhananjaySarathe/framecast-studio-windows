@@ -23,15 +23,19 @@ if (!(Test-Path (Join-Path $qt "bin/windeployqt.exe"))) {
 }
 $baseline = "4702e381dbbd9b54d3f7e1eb565cd8981c1814cd"
 $vcpkg = Join-Path $deps "vcpkg"
-if (!(Test-Path (Join-Path $vcpkg ".git"))) {
-    if ((Test-Path $vcpkg) -and (Get-ChildItem $vcpkg -Force | Select-Object -First 1)) { throw "$vcpkg is not an empty directory or a vcpkg checkout." }
+$newCheckout = !(Test-Path (Join-Path $vcpkg ".git"))
+if ($newCheckout) {
+    # CI may restore only ignored dependency downloads before Git is initialized.
+    if ((Test-Path $vcpkg) -and (Get-ChildItem $vcpkg -Force | Where-Object { $_.Name -ne "downloads" } | Select-Object -First 1)) { throw "$vcpkg contains files other than the cached downloads directory." }
     Invoke-Checked -File git -Arguments @("init", $vcpkg)
     Invoke-Checked -File git -Arguments @("-C", $vcpkg, "remote", "add", "origin", "https://github.com/microsoft/vcpkg.git")
 }
 $origin = & git -C $vcpkg remote get-url origin
 if ($LASTEXITCODE -or $origin -ne "https://github.com/microsoft/vcpkg.git") { throw "The dependency checkout must use the official microsoft/vcpkg repository." }
-$dirty = & git -C $vcpkg status --porcelain
-if ($LASTEXITCODE -or $dirty) { throw "The dependency checkout has local changes. Preserve them before running setup." }
+if (!$newCheckout) {
+    $dirty = & git -C $vcpkg status --porcelain
+    if ($LASTEXITCODE -or $dirty) { throw "The dependency checkout has local changes. Preserve them before running setup." }
+}
 Invoke-Checked -File git -Arguments @("-C", $vcpkg, "fetch", "--depth=1", "origin", $baseline)
 Invoke-Checked -File git -Arguments @("-C", $vcpkg, "checkout", "--detach", $baseline)
 if (!(Test-Path (Join-Path $vcpkg "vcpkg.exe"))) {

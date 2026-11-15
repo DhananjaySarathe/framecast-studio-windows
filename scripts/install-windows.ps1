@@ -8,6 +8,7 @@ param(
 )
 . (Join-Path $PSScriptRoot "common.ps1")
 Assert-Windows
+$ProgressPreference = "SilentlyContinue"
 if ([Environment]::OSVersion.Version.Build -lt 22000) { throw "Windows 11 or later is required." }
 if (!$InstallerPath) {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

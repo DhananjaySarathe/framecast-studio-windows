@@ -1,0 +1,31 @@
+name: Install published Windows release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the v prefix
+        required: true
+        default: "0.1.0"
+permissions:
+  contents: read
+jobs:
+  install-release:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install verification tools
+        run: choco install ffmpeg --no-progress -y
+      - name: Download, verify checksum, install, launch, record and uninstall
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: ./scripts/test-installer.ps1 -BuildDir build/release-install -ReleaseVersion $env:RELEASE_VERSION
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-release-install-evidence
+          path: build/release-install/installer-test/**
+          if-no-files-found: ignore
