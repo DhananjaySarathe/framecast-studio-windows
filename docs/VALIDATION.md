@@ -21,6 +21,8 @@ Measured on the laptop:
 - **Closing while recording:** the app asks, then finalizes both files (136.6 s each, no decode errors).
 - **Scaling:** with Qt's scale factor at 125% and 150% the window fits the 1080p work area and the transport stays reachable. True Windows display scaling and multiple displays were not available.
 
+Evidence: [Windows CI on the released commit](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43730049296) ran all eight CTest suites, the media and RTMP checks and the installer check. The [tag build](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43730511779) produced the [published binaries](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.4) (Setup.exe SHA-256 `c89e34a5b4fe3eb961bb2abd4bfbb4eba8296c2b2312b2e763e613df2fcb7149`), which were also installed and recorded with on the laptop, and the [published-release test](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43731184250) downloaded, verified, installed, recorded with and uninstalled them. The 0.1.4 executable's file properties still read 0.1.1, a stale version resource carried since 0.1.1; the installer and the Windows Apps list report 0.1.4, and the resource follows the project version from the next release.
+
 Not yet checked on hardware: unplugging the camera and headset mid-show (the automated `source-failures` suite covers the code path), the microphone privacy-denied message, vendor encoders other than NVENC, and real streaming services.
 
 ## Previous preview: 0.1.3

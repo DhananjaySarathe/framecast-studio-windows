@@ -38,7 +38,7 @@ Get-FileHash .\Framecast-Studio-Windows-0.1.4-x64-Setup.exe
 .\Framecast-Studio-Windows-0.1.4-x64-Setup.exe
 ```
 
-The hash should be `803ae18087aa6cefd6e9c1bd7561ca67211db75aff2b1b39e344836b89b3006c`. The release is a pre-release, so link to the exact version: GitHub's `/releases/latest` link skips pre-releases.
+The hash should be `c89e34a5b4fe3eb961bb2abd4bfbb4eba8296c2b2312b2e763e613df2fcb7149`. The release is a pre-release, so link to the exact version: GitHub's `/releases/latest` link skips pre-releases.
 
 If you have Git installed, the install helper checks the hash for you. Open PowerShell:
 
