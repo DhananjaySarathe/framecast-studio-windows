@@ -6,8 +6,8 @@ Windows 11 **Intel/AMD x64** desktop studio: screen/window and webcam capture, l
 
 ## Install on your laptop — no build tools required
 
-1. Open [Windows downloads, v0.1.2](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.2).
-2. Download `Framecast-Studio-Windows-0.1.2-x64-Setup.exe` and run it. Windows may display an unknown-publisher warning because this preview is unsigned.
+1. Open [Windows downloads, v0.1.3](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.3).
+2. Download `Framecast-Studio-Windows-0.1.3-x64-Setup.exe` and run it. Windows may display an unknown-publisher warning because this preview is unsigned.
 3. Open **Framecast Studio** from the Start menu. Choose **Add → select your sources → Start preview**. Use **Record** for local files or **Destinations** followed by **Start broadcast**.
 
 The installer includes Qt, FFmpeg and the C++ runtimes. It installs into `%LOCALAPPDATA%\Programs\Framecast Studio` for your user account. The portable ZIP is an alternative: extract the entire ZIP into a folder and open `FramecastStudio.exe`.
@@ -15,11 +15,17 @@ The installer includes Qt, FFmpeg and the C++ runtimes. It installs into `%LOCAL
 To verify a downloaded installer in PowerShell:
 
 ```powershell
-Get-FileHash .\Framecast-Studio-Windows-0.1.2-x64-Setup.exe -Algorithm SHA256
+Get-FileHash .\Framecast-Studio-Windows-0.1.3-x64-Setup.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
 Compare the matching filename's hash. The install helper below performs this comparison automatically.
+
+## If something goes wrong
+
+Framecast writes a log for every session: your PC's hardware, the devices and encoder it chose, every warning, and what the app was doing if the window stopped responding. Open **Settings (the gear) → Open logs folder**, or go to `%LOCALAPPDATA%\Framecast\Framecast Studio\logs`, and send the newest `framecast-*.log` with your report. If the app crashed, also send `framecast-crash.dmp` from the same folder.
+
+A missing camera, a blocked microphone or an unplugged headset no longer stops a show. The studio shows an amber notice, carries on without that source and retries it every few seconds. If Windows blocks the microphone or camera, allow desktop apps under **Windows Settings → Privacy & security**.
 
 ## Install using a command
 
@@ -27,9 +33,9 @@ Without Git, use `curl.exe`, which ships with Windows 11. In PowerShell type `cu
 
 ```powershell
 cd $HOME\Downloads
-curl.exe -LO https://github.com/DhananjaySarathe/framecast-studio-windows/releases/download/v0.1.2/Framecast-Studio-Windows-0.1.2-x64-Setup.exe
-Get-FileHash .\Framecast-Studio-Windows-0.1.2-x64-Setup.exe
-.\Framecast-Studio-Windows-0.1.2-x64-Setup.exe
+curl.exe -LO https://github.com/DhananjaySarathe/framecast-studio-windows/releases/download/v0.1.3/Framecast-Studio-Windows-0.1.3-x64-Setup.exe
+Get-FileHash .\Framecast-Studio-Windows-0.1.3-x64-Setup.exe
+.\Framecast-Studio-Windows-0.1.3-x64-Setup.exe
 ```
 
 The hash should be `ae145b783495623cf3e88640b1dea327ff8efd12231e05d3086bea09d7b03415`. The release is a pre-release, so link to the exact version: GitHub's `/releases/latest` link skips pre-releases.
@@ -42,7 +48,7 @@ cd framecast-studio-windows
 .\install.cmd -Silent
 ```
 
-`install.cmd` downloads the v0.1.2 release installer and checks its SHA-256 against the release checksum file before running it. Omit `-Silent` to use the installer wizard. No compiler, Python or Qt SDK is needed for this command. If Git is not installed, use the download above, or download the repository ZIP through **Code → Download ZIP** and run `install.cmd` from the extracted project folder.
+`install.cmd` downloads the v0.1.3 release installer and checks its SHA-256 against the release checksum file before running it. Omit `-Silent` to use the installer wizard. No compiler, Python or Qt SDK is needed for this command. If Git is not installed, use the download above, or download the repository ZIP through **Code → Download ZIP** and run `install.cmd` from the extracted project folder.
 
 To update an existing clone, close Framecast Studio, then run:
 

@@ -1,6 +1,17 @@
 # Windows qualification and migration
 
-## Current preview: 0.1.2
+## Current preview: 0.1.3
+
+0.1.3 follows a study of how OBS Studio, Sunshine and Microsoft's capture sample handle the same problems; the findings and the rules taken from them are in [RELIABILITY.md](RELIABILITY.md). It fixes the studio freezing when **Add** is clicked and changes how the engine behaves when something goes wrong.
+
+- **Add no longer freezes.** The window list no longer sends messages to windows (Framecast's own window had to answer one while it was waiting for the list). `native-window-capture` now lists windows from a worker while the UI thread waits and requires it to return.
+- **Real Windows path tested.** `native-studio` drives the real window with real Windows devices and no synthetic sources: Add, device lists, Start preview on the first display, record both canvases, stop. On the hosted runner (Windows build 26100, no audio devices, no GPU): one display and one window were listed in 6 ms; the preview captured the display; missing microphone and desktop sound appeared as warnings while the session carried on; both recordings got 62 of 62 frames with none skipped and none late.
+- **Devices fail on their own.** `source-failures` runs a session through a busy camera, a screen capture that breaks mid-session, a late microphone and desktop sound that cannot be opened. The recording completes, each failure shows as a warning, and the sources come back without a restart.
+- **Slow encoders cost pictures, not recordings.** `recording-backlog` stalls the writer: the recording completes with skipped pictures counted; only a writer that never recovers fails.
+- **Encoders are test-encoded before use.** On the runner NVENC, Quick Sync, AMF and Media Foundation hardware were rejected and Media Foundation's software encoder passed.
+- **Session log.** Each session writes the computer, devices, encoder tests, warnings, statistics and output results to a log, with a watchdog entry if the interface stops responding.
+
+## Previous preview: 0.1.2
 
 0.1.2 fixes the studio falling behind real time on laptops. That showed up as hangs, a black screen and recordings failing with "Recording cannot keep up". Evidence from [Windows CI run 43713599413](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43713599413) (Windows Server 2025, MSVC v143, no GPU):
 

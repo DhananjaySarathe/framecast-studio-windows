@@ -96,8 +96,10 @@ public:
         try {
             if (winrt::Windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
                     L"Windows.Graphics.Capture.GraphicsCaptureSession", L"IsBorderRequired")) {
-                GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).get();
-                session_.IsBorderRequired(false);
+                // Bounded: capture must start even if Windows never answers the request.
+                const auto request = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless);
+                if (request.wait_for(std::chrono::seconds(2)) == winrt::Windows::Foundation::AsyncStatus::Completed)
+                    session_.IsBorderRequired(false);
             }
         } catch (...) {}
         session_.StartCapture();

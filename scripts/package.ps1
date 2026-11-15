@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$BuildDir,
     [Parameter(Mandatory=$true)][string]$QtDir,
-    [string]$Version = "0.1.2"
+    [string]$Version = "0.1.3"
 )
 $ErrorActionPreference = "Stop"
 $build = (Resolve-Path $BuildDir).Path
