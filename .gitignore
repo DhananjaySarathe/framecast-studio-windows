@@ -1,0 +1,15 @@
+.deps/
+build/
+local-output/
+.impeccable/review/
+.DS_Store
+__pycache__/
+*.pyc
+.env
+.env.*
+*.p12
+*.pem
+*.key
+*.mkv
+*.mov
+*.mp4

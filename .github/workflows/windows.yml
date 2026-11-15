@@ -1,0 +1,85 @@
+name: Windows studio
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  build-and-verify:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache/restore@v4
+        id: qt-cache
+        with:
+          path: .deps/Qt
+          key: qt-6.8.3-windows-msvc2022-x64
+      - uses: actions/cache/restore@v4
+        id: vcpkg-cache
+        with:
+          path: |
+            C:/Users/runneradmin/AppData/Local/vcpkg/archives
+            .deps/vcpkg/downloads
+          key: vcpkg-release-windows2025-${{ hashFiles('vcpkg.json', 'triplets/**') }}
+      - name: Parse PowerShell helpers
+        shell: powershell
+        run: |
+          Get-ChildItem scripts/*.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors) { throw ($errors | Out-String) }
+          }
+      - name: Set up pinned Qt and vcpkg
+        shell: pwsh
+        run: |
+          ./setup.cmd
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "$pwd/.deps/Qt/6.8.3/msvc2022_64/bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          "QT_PLUGIN_PATH=$pwd/.deps/Qt/6.8.3/msvc2022_64/plugins" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - uses: actions/cache/save@v4
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        with:
+          path: .deps/Qt
+          key: qt-6.8.3-windows-msvc2022-x64
+      - name: Configure standalone Windows app
+        run: ./build.cmd -ConfigureOnly
+      - uses: actions/cache/save@v4
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            C:/Users/runneradmin/AppData/Local/vcpkg/archives
+            .deps/vcpkg/downloads
+          key: vcpkg-release-windows2025-${{ hashFiles('vcpkg.json', 'triplets/**') }}
+      - name: Build
+        id: build
+        run: ./build.cmd -SkipConfigure
+      - name: Native capture, core, live-session and UI tests
+        run: ctest --test-dir build/windows -C Release --output-on-failure --output-junit test-results.xml
+      - name: Install media verification tools
+        run: choco install ffmpeg --no-progress -y
+      - name: Media and delayed RTMP recovery tests
+        run: python tests/verify_media.py build/windows/Release/framecast-engine.exe --network --evidence build/windows/media-test
+      - name: Package installer and portable app
+        id: package
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: ./scripts/package.ps1 -BuildDir build/windows -QtDir .deps/Qt/6.8.3/msvc2022_64
+      - name: Install helper, packaged runtime and uninstall
+        if: ${{ !cancelled() && steps.package.outcome == 'success' }}
+        run: ./scripts/test-installer.ps1 -BuildDir build/windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: framecast-windows-installer-x64
+          path: build/windows/installer/**
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-test-evidence
+          path: |
+            build/windows/test-results.xml
+            build/windows/Testing/Temporary/LastTest.log
+            build/windows/installer-test/**
+            build/windows/media-test/**
+          if-no-files-found: ignore
