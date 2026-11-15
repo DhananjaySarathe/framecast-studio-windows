@@ -2,6 +2,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <cstring>
+#include <functional>
+#include <thread>
 #include <limits>
 #include <stdexcept>
 #ifdef _WIN32
@@ -24,8 +28,12 @@ int64_t samplesAtFrame(int64_t frame, int fps) {
 }
 Image::Image(int w, int h) : width(w), height(h) {
     if (w < 1 || h < 1 || w > 8192 || h > 8192) throw std::invalid_argument("Invalid image size");
+    // Opaque black. Filling whole pixels lets the compiler write wide words instead of one byte in four.
     bgra.resize(static_cast<size_t>(w) * h * 4);
-    for (size_t i = 3; i < bgra.size(); i += 4) bgra[i] = 255;
+    const uint8_t black[4] = {0, 0, 0, 255};
+    uint32_t pixel; std::memcpy(&pixel, black, 4);
+    auto* data = bgra.data();
+    for (size_t i = 0, n = static_cast<size_t>(w) * h; i < n; ++i) std::memcpy(data + i*4, &pixel, 4);
 }
 void FrameHistory::push(VideoFrame frame) {
     std::lock_guard guard(mutex_);
@@ -51,10 +59,91 @@ Scene screenCameraScene() {
          {"camera", {mV, .44, 1-2*mV, .46}, Fit::fill, Mask::rounded, .035}}
     };
 }
-Image compose(const Scene& scene, Canvas canvas, int width, int height,
-              const std::map<std::string, std::shared_ptr<const Image>>& images) {
-    Image out(width, height);
-    for (const auto& l : canvas == Canvas::horizontal ? scene.horizontal : scene.vertical) {
+namespace {
+// A small persistent pool for splitting one frame's rows across cores. Creating threads per frame
+// costs more than composing a band; one job runs at a time and the caller works on a share itself.
+class RowPool {
+public:
+    static RowPool& shared() { static RowPool pool; return pool; }
+    void run(int count, const std::function<void(int)>& task) {
+        if (count <= 1 || workers_.empty()) { for (int n = 0; n < count; ++n) task(n); return; }
+        std::lock_guard job(jobMutex_);
+        {
+            std::lock_guard guard(mutex_);
+            task_ = &task; next_ = 0; count_ = count; pending_ = count; ++generation_;
+        }
+        wake_.notify_all();
+        work();
+        std::unique_lock lock(mutex_);
+        done_.wait(lock, [&] { return pending_ == 0; });
+        task_ = nullptr;
+    }
+    int threads() const { return static_cast<int>(workers_.size()) + 1; }
+    ~RowPool() {
+        { std::lock_guard guard(mutex_); stopping_ = true; }
+        wake_.notify_all();
+        for (auto& worker : workers_) worker.join();
+    }
+private:
+    RowPool() {
+        // Leave cores for capture, encoders and the UI; four bands already fit a 1080p frame in a few ms.
+        const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned extra = std::min(3u, hardware > 2 ? hardware - 2 : 0u);
+        for (unsigned n = 0; n < extra; ++n) workers_.emplace_back([this] { loop(); });
+    }
+    void loop() {
+        uint64_t seen = 0;
+        while (true) {
+            {
+                std::unique_lock lock(mutex_);
+                wake_.wait(lock, [&] { return stopping_ || generation_ != seen; });
+                if (stopping_) return;
+                seen = generation_;
+            }
+            work();
+        }
+    }
+    void work() {
+        while (true) {
+            int index; const std::function<void(int)>* task;
+            {
+                std::lock_guard guard(mutex_);
+                if (!task_ || next_ >= count_) return;
+                index = next_++; task = task_;
+            }
+            (*task)(index);
+            std::lock_guard guard(mutex_);
+            if (--pending_ == 0) done_.notify_all();
+        }
+    }
+    std::vector<std::thread> workers_;
+    std::mutex jobMutex_, mutex_;
+    std::condition_variable wake_, done_;
+    const std::function<void(int)>* task_ = nullptr;
+    int next_ = 0, count_ = 0, pending_ = 0;
+    uint64_t generation_ = 0;
+    bool stopping_ = false;
+};
+
+// Everything about a layer that depends only on the column or only on the row, computed once per
+// frame instead of once per pixel. The per-pixel arithmetic below is unchanged, so output is identical
+// to the original per-pixel compositor (tests/compose_perf_tests.cpp checks this).
+struct PreparedLayer {
+    const Image* src = nullptr;
+    int x0 = 0, x1 = 0, y0 = 0, y1 = 0;
+    Mask mask = Mask::none;
+    double limit = 0;                 // circle: 1, rounded: radius squared
+    std::vector<int> column, row;     // source index, or -1 outside the picture
+    std::vector<double> columnMask, rowMask;
+    double alpha[256];                // source alpha byte * layer opacity
+    bool opaque = false;              // opacity is exactly 1
+};
+
+std::vector<PreparedLayer> prepare(const std::vector<Layer>& layers, int width, int height,
+                                   const std::map<std::string, std::shared_ptr<const Image>>& images) {
+    std::vector<PreparedLayer> out;
+    out.reserve(layers.size());
+    for (const auto& l : layers) {
         const auto found = images.find(l.source);
         if (found == images.end() || !found->second) continue;
         const Image& src = *found->second;
@@ -67,28 +156,79 @@ Image compose(const Scene& scene, Canvas canvas, int width, int height,
         const double left = l.rect.x * width, top = l.rect.y * height;
         const double ox = (fw - src.width*sx)/2, oy = (fh - src.height*sy)/2;
         // Clamp in floating point before converting untrusted scene coordinates to integers.
-        const int x0 = static_cast<int>(std::clamp(left, 0., double(width)));
-        const int y0 = static_cast<int>(std::clamp(top, 0., double(height)));
-        const int x1 = static_cast<int>(std::clamp(std::ceil(left+fw), 0., double(width)));
-        const int y1 = static_cast<int>(std::clamp(std::ceil(top+fh), 0., double(height)));
+        PreparedLayer p;
+        p.src = &src;
+        p.x0 = static_cast<int>(std::clamp(left, 0., double(width)));
+        p.y0 = static_cast<int>(std::clamp(top, 0., double(height)));
+        p.x1 = static_cast<int>(std::clamp(std::ceil(left+fw), 0., double(width)));
+        p.y1 = static_cast<int>(std::clamp(std::ceil(top+fh), 0., double(height)));
+        if (p.x1 <= p.x0 || p.y1 <= p.y0) continue;
         const double radius = std::clamp(l.radius, 0., .5) * std::min(fw, fh);
-        for (int y = y0; y < y1; ++y) for (int x = x0; x < x1; ++x) {
-            const double lx = x+.5-left, ly = y+.5-top;
-            if (l.mask == Mask::circle && std::pow((lx-fw/2)/(fw/2), 2)+std::pow((ly-fh/2)/(fh/2), 2) > 1) continue;
-            if (l.mask == Mask::rounded && radius > 0) {
-                const double dx = std::max({radius-lx, lx-(fw-radius), 0.});
-                const double dy = std::max({radius-ly, ly-(fh-radius), 0.});
-                if (dx*dx+dy*dy > radius*radius) continue;
+        p.mask = l.mask == Mask::rounded && radius <= 0 ? Mask::none : l.mask;
+        p.limit = p.mask == Mask::circle ? 1 : radius*radius;
+        p.column.resize(p.x1 - p.x0); p.columnMask.resize(p.x1 - p.x0);
+        for (int x = p.x0; x < p.x1; ++x) {
+            const double lx = x+.5-left;
+            const double u = (lx-ox)/sx;
+            int ix = -1;
+            if (u >= 0 && u < src.width) { ix = static_cast<int>(u); if (l.mirrored) ix = src.width-1-ix; }
+            p.column[x - p.x0] = ix;
+            if (p.mask == Mask::circle) p.columnMask[x - p.x0] = std::pow((lx-fw/2)/(fw/2), 2);
+            else if (p.mask == Mask::rounded) { const double dx = std::max({radius-lx, lx-(fw-radius), 0.}); p.columnMask[x - p.x0] = dx*dx; }
+        }
+        p.row.resize(p.y1 - p.y0); p.rowMask.resize(p.y1 - p.y0);
+        for (int y = p.y0; y < p.y1; ++y) {
+            const double ly = y+.5-top;
+            const double v = (ly-oy)/sy;
+            p.row[y - p.y0] = v >= 0 && v < src.height ? static_cast<int>(v) : -1;
+            if (p.mask == Mask::circle) p.rowMask[y - p.y0] = std::pow((ly-fh/2)/(fh/2), 2);
+            else if (p.mask == Mask::rounded) { const double dy = std::max({radius-ly, ly-(fh-radius), 0.}); p.rowMask[y - p.y0] = dy*dy; }
+        }
+        const double opacity = std::clamp(l.opacity, 0., 1.);
+        p.opaque = opacity == 1;
+        for (int a = 0; a < 256; ++a) p.alpha[a] = a/255. * opacity;
+        out.push_back(std::move(p));
+    }
+    return out;
+}
+
+void drawRows(const std::vector<PreparedLayer>& layers, Image& out, int rowBegin, int rowEnd) {
+    for (const auto& p : layers) {
+        const int begin = std::max(rowBegin, p.y0), end = std::min(rowEnd, p.y1);
+        const int sourceWidth = p.src->width;
+        for (int y = begin; y < end; ++y) {
+            const int iy = p.row[y - p.y0];
+            if (iy < 0) continue;
+            const double rowMask = p.mask == Mask::none ? 0 : p.rowMask[y - p.y0];
+            const uint8_t* source = p.src->bgra.data() + static_cast<size_t>(iy)*sourceWidth*4;
+            uint8_t* target = out.bgra.data() + static_cast<size_t>(y)*out.width*4;
+            for (int x = p.x0; x < p.x1; ++x) {
+                const int column = x - p.x0;
+                if (p.mask != Mask::none && p.columnMask[column]+rowMask > p.limit) continue;
+                const int ix = p.column[column];
+                if (ix < 0) continue;
+                const uint8_t* s = source + static_cast<size_t>(ix)*4;
+                uint8_t* d = target + static_cast<size_t>(x)*4;
+                if (p.opaque && s[3] == 255) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; continue; }
+                const double alpha = p.alpha[s[3]];
+                if (alpha == 0) continue;
+                for (int c = 0; c < 3; ++c) d[c] = static_cast<uint8_t>(s[c]*alpha + d[c]*(1-alpha));
             }
-            double u = (lx-ox)/sx, v = (ly-oy)/sy;
-            if (u < 0 || v < 0 || u >= src.width || v >= src.height) continue;
-            int ix = static_cast<int>(u), iy = static_cast<int>(v);
-            if (l.mirrored) ix = src.width-1-ix;
-            const size_t a = (static_cast<size_t>(iy)*src.width+ix)*4, b = (static_cast<size_t>(y)*width+x)*4;
-            const double alpha = src.bgra[a+3]/255. * std::clamp(l.opacity, 0., 1.);
-            for (int c = 0; c < 3; ++c) out.bgra[b+c] = static_cast<uint8_t>(src.bgra[a+c]*alpha + out.bgra[b+c]*(1-alpha));
         }
     }
+}
+}
+
+Image compose(const Scene& scene, Canvas canvas, int width, int height,
+              const std::map<std::string, std::shared_ptr<const Image>>& images) {
+    Image out(width, height);
+    const auto layers = prepare(canvas == Canvas::horizontal ? scene.horizontal : scene.vertical, width, height, images);
+    if (layers.empty()) return out;
+    // Small canvases (thumbnails, previews) are cheaper inline than handing them to other threads.
+    auto& pool = RowPool::shared();
+    const int bands = static_cast<int>(width)*height < 300000 ? 1 : pool.threads();
+    const int step = (height + bands - 1) / bands;
+    pool.run(bands, [&](int band) { drawRows(layers, out, band*step, std::min(height, (band+1)*step)); });
     return out;
 }
 std::shared_ptr<const Image> testPattern(int64_t frame, int fps, int width, int height) {

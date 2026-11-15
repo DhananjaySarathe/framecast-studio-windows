@@ -17,6 +17,7 @@
 #include <ksmedia.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <future>
 #include <thread>
@@ -45,8 +46,10 @@ class ScreenCapture final : public VideoCapture {
     std::shared_ptr<std::atomic<bool>> closed_ = std::make_shared<std::atomic<bool>>(false);
     winrt::event_token closedToken_{};
     winrt::Windows::Graphics::SizeInt32 size_{};
+    Direct3D11CaptureFrame pending_{nullptr};
+    Nanoseconds minInterval_ = 0, lastReadback_ = INT64_MIN/2;
 public:
-    ScreenCapture(int index, uintptr_t window) {
+    ScreenCapture(int index, uintptr_t window, int fps) : minInterval_(1000000000LL*2/(3*std::max(1, fps))) {
         if (!GraphicsCaptureSession::IsSupported()) throw std::runtime_error("Windows Graphics Capture is unavailable");
         auto result = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                             nullptr, 0, D3D11_SDK_VERSION, &device_, nullptr, &context_);
@@ -74,17 +77,24 @@ public:
         session_ = pool_.CreateCaptureSession(item_);
         session_.StartCapture();
     }
-    ~ScreenCapture() override { try { if (item_) item_.Closed(closedToken_); if (session_) session_.Close(); if (pool_) pool_.Close(); } catch (...) {} }
+    ~ScreenCapture() override { try { pending_ = nullptr; if (item_) item_.Closed(closedToken_); if (session_) session_.Close(); if (pool_) pool_.Close(); } catch (...) {} }
     void poll() override {
         try { captureFrame(); }
         catch (const winrt::hresult_error& e) { hr(e.code(), "Windows screen capture failed"); }
     }
     void captureFrame() {
         if (*closed_) return;
-        auto frame = pool_.TryGetNextFrame();
-        if (!frame) return;
-        // Use the newest frame, rather than accumulating capture latency.
-        while (auto newer = pool_.TryGetNextFrame()) frame = std::move(newer);
+        // Keep only the newest frame, rather than accumulating capture latency. Read it back at most about
+        // 1.5x the output rate: a 120-144 Hz laptop panel otherwise costs a full-screen GPU copy, a pipeline
+        // stall and a memcpy on the engine thread every few milliseconds. The newest frame is held, not
+        // dropped, because Windows stops delivering frames once the desktop stops changing.
+        while (auto newer = pool_.TryGetNextFrame()) pending_ = std::move(newer);
+        if (!pending_) return;
+        const Nanoseconds now = hostNow();
+        if (now - lastReadback_ < minInterval_) return;
+        auto frame = std::move(pending_);
+        pending_ = nullptr;
+        lastReadback_ = now;
         auto size = frame.ContentSize();
         if (size.Width <= 0 || size.Height <= 0) return;
         if (size.Width != size_.Width || size.Height != size_.Height) {
@@ -199,6 +209,23 @@ public:
             hr(attributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback.Get()), "Set camera callback");
             hr(attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE), "Enable camera colour conversion");
             hr(MFCreateSourceReaderFromMediaSource(source_.Get(), attributes.Get(), &state_->reader), "Create camera reader");
+            // Choose the camera's own mode before asking for RGB32. Otherwise Media Foundation keeps the device's
+            // current mode, which on many webcams is full resolution at a few frames per second, or a size that
+            // makes the software colour conversion too slow. Prefer 30 fps, then the size nearest 1280x720,
+            // never above 1920x1080 unless nothing else exists.
+            ComPtr<IMFMediaType> best; double bestScore = -1e18;
+            for (DWORD n = 0; n < 512; ++n) {
+                ComPtr<IMFMediaType> native;
+                if (FAILED(state_->reader->GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, n, &native))) break;
+                UINT32 w = 0, h = 0, numerator = 0, denominator = 0;
+                if (FAILED(MFGetAttributeSize(native.Get(), MF_MT_FRAME_SIZE, &w, &h)) || !w || !h) continue;
+                if (FAILED(MFGetAttributeRatio(native.Get(), MF_MT_FRAME_RATE, &numerator, &denominator)) || !denominator) continue;
+                double score = std::min(double(numerator)/denominator, 30.)*1000;
+                if (w > 1920 || h > 1080) score -= 20000;
+                score -= std::abs(double(w)*h - 1280.*720)/1000;
+                if (score > bestScore) { bestScore = score; best = native; }
+            }
+            if (best) hr(state_->reader->SetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, nullptr, best.Get()), "Choose camera mode");
             ComPtr<IMFMediaType> type; hr(MFCreateMediaType(&type), "Create camera format");
             hr(type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video), "Set camera media type");
             hr(type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32), "Set camera pixel format");
@@ -331,8 +358,8 @@ std::vector<CaptureChoice> listCameras() {
     }
     CoTaskMemFree(devices);return out;
 }
-std::unique_ptr<VideoCapture> captureScreen(int monitor, uintptr_t window) {
-    try { return std::make_unique<ScreenCapture>(monitor, window); }
+std::unique_ptr<VideoCapture> captureScreen(int monitor, uintptr_t window, int fps) {
+    try { return std::make_unique<ScreenCapture>(monitor, window, fps); }
     catch (const winrt::hresult_error& e) { hr(e.code(), "Start Windows screen capture"); throw; }
 }
 std::unique_ptr<VideoCapture> captureCamera(int device) { return std::make_unique<CameraCapture>(device); }

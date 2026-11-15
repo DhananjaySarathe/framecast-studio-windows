@@ -21,7 +21,7 @@ int runEngine(const EngineConfig& cfg, std::atomic<bool>& stop,
     const Nanoseconds origin = hostNow();
     if (!cfg.synthetic) {
 #ifdef _WIN32
-        screen = captureScreen(cfg.monitor, cfg.windowHandle);
+        screen = captureScreen(cfg.monitor, cfg.windowHandle, cfg.fps);
         if (cfg.camera) camera = captureCamera(cfg.cameraIndex);
         if (cfg.microphone) audioInputs.push_back(captureAudio(mixer, origin, false));
         if (cfg.desktopAudio) audioInputs.push_back(captureAudio(mixer, origin, true));
@@ -71,14 +71,31 @@ int runEngine(const EngineConfig& cfg, std::atomic<bool>& stop,
     reconcile(live ? live->commands().outputs : initial);
     // Delay playout so audio packets and captured video can arrive before their shared deadline.
     constexpr Nanoseconds latency = 120000000;
+    const Nanoseconds frameTime = 1000000000LL/cfg.fps;
+    // The studio's monitors show small renders; full-size frames are only composed for outputs.
+    const double previewScale = std::min(1., 960./cfg.width);
+    const int previewWidth = std::max(2, static_cast<int>(std::lround(cfg.width*previewScale/2))*2);
+    const int previewHeight = std::max(2, static_cast<int>(std::lround(cfg.height*previewScale/2))*2);
+    auto previewOf = [&](const Scene& scene, Canvas canvas, const std::map<std::string, std::shared_ptr<const Image>>& images) {
+        const bool landscape = canvas == Canvas::horizontal;
+        return std::make_shared<const Image>(compose(scene, canvas, landscape ? previewWidth : previewHeight,
+                                                     landscape ? previewHeight : previewWidth, images));
+    };
+    std::map<Canvas, std::shared_ptr<const Image>> lastRendered;
+    int64_t lastPublished = -1000;
     const int64_t count = static_cast<int64_t>(std::ceil(cfg.seconds*cfg.fps));
     for (int64_t frame = 0; frame < count && !stop; ++frame) {
-        const Nanoseconds time = origin + frame*1000000000LL/cfg.fps;
+        const Nanoseconds time = origin + frame*frameTime;
         while (!stop && hostNow() < time+latency) {
             if (screen) screen->poll();
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
         if (stop) break;
+        // More than two frames behind real time: repeat the last picture instead of composing a new one,
+        // so audio and output timing stay continuous and the engine catches up instead of drifting further
+        // behind (which used to starve the capture history and overflow the recording queue).
+        const bool late = hostNow() > time+latency+2*frameTime;
+        if (late) ++state.lateFrames;
         if (screen) screen->poll();
         for (auto& input : audioInputs) input->check();
         const int64_t sample = samplesAtFrame(frame, cfg.fps), next = samplesAtFrame(frame+1, cfg.fps);
@@ -109,24 +126,33 @@ int runEngine(const EngineConfig& cfg, std::atomic<bool>& stop,
             audio = adjusted;
         }
         std::map<Canvas, std::shared_ptr<const Image>> rendered;
+        const Scene& program = live ? commands.program : cfg.scene;
         auto renderCanvas = [&](Canvas canvas) {
             auto& image = rendered[canvas];
-            if (!image) image = std::make_shared<Image>(compose(live ? commands.program : cfg.scene, canvas,
-                canvas == Canvas::horizontal ? cfg.width : cfg.height,
-                canvas == Canvas::horizontal ? cfg.height : cfg.width, images));
+            if (!image) {
+                const auto previous = lastRendered.find(canvas);
+                if (late && previous != lastRendered.end()) image = previous->second;
+                else image = lastRendered[canvas] = std::make_shared<const Image>(compose(program, canvas,
+                    canvas == Canvas::horizontal ? cfg.width : cfg.height,
+                    canvas == Canvas::horizontal ? cfg.height : cfg.width, images));
+            }
             return image;
         };
         for (auto& [id, output] : outputs) {
             (void)id;
             if (!output.closing) output.worker->submit({frame, sample, renderCanvas(output.spec.canvas), audio});
         }
-        if (live && frame%2 == 0) {
-            renderCanvas(Canvas::horizontal); renderCanvas(Canvas::vertical);
-            state.program = rendered; state.preview.clear(); state.sources = images;
-            if (commands.preview) for (auto canvas : {Canvas::horizontal, Canvas::vertical})
-                state.preview[canvas] = std::make_shared<Image>(compose(*commands.preview, canvas,
-                    canvas == Canvas::horizontal ? cfg.width : cfg.height,
-                    canvas == Canvas::horizontal ? cfg.height : cfg.width, images));
+        // Drop canvases no output uses any more, so a later late frame never repeats a stale picture.
+        for (auto it = lastRendered.begin(); it != lastRendered.end();)
+            it = rendered.contains(it->first) ? std::next(it) : lastRendered.erase(it);
+        // About 15 monitor updates per second; when behind, only every tenth frame so the UI still moves.
+        if (live && frame%2 == 0 && (!late || frame-lastPublished >= 10)) {
+            lastPublished = frame;
+            state.program.clear(); state.preview.clear(); state.sources = images;
+            for (auto canvas : {Canvas::horizontal, Canvas::vertical}) {
+                state.program[canvas] = previewOf(program, canvas, images);
+                if (commands.preview) state.preview[canvas] = previewOf(*commands.preview, canvas, images);
+            }
             state.frame = frame;
             state.microphone = mixer.level(cfg.synthetic ? "tone" : "microphone", sample, static_cast<int>(next-sample));
             state.desktop = mixer.level("desktop", sample, static_cast<int>(next-sample));

@@ -84,7 +84,8 @@ std::vector<CaptureChoice> listMonitors();
 std::vector<CaptureChoice> listWindows();
 std::vector<CaptureChoice> listCameras();
 // monitorIndex is zero based. windowHandle overrides it when nonzero.
-std::unique_ptr<VideoCapture> captureScreen(int monitorIndex, uintptr_t windowHandle = 0);
+// fps is the output frame rate; screen frames are read back from the GPU at most about 1.5 times that often.
+std::unique_ptr<VideoCapture> captureScreen(int monitorIndex, uintptr_t windowHandle = 0, int fps = 30);
 std::unique_ptr<VideoCapture> captureCamera(int deviceIndex);
 std::unique_ptr<AudioCapture> captureAudio(AudioTimeline& mixer, Nanoseconds origin, bool loopback);
 void initializeWindowsMedia();
@@ -144,7 +145,9 @@ struct LiveState {
     bool running = false, done = false;
     std::string error;
     int64_t frame = 0;
+    uint64_t lateFrames = 0; // frames that repeated the previous picture because the engine was behind
     float microphone = 0, desktop = 0, master = 0;
+    // Monitor-sized renders (at most 960 wide), not the full output canvases.
     std::map<Canvas, std::shared_ptr<const Image>> program, preview;
     std::map<std::string, std::shared_ptr<const Image>> sources;
     std::vector<OutputStatus> outputs;
