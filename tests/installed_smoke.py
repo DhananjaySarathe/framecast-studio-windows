@@ -19,8 +19,18 @@ for key in ("QT_PLUGIN_PATH", "QML2_IMPORT_PATH", "QT_QPA_PLATFORM", "FRAMECAST_
 system_root = Path(env["SYSTEMROOT"])
 env["PATH"] = os.pathsep.join([str(root), str(system_root / "System32"), str(system_root)])
 
+launch_count = 0
+
 def launch(arguments, timeout=30):
-    process = subprocess.run([str(a) for a in arguments], env=env, cwd=evidence, capture_output=True, timeout=timeout)
+    global launch_count
+    launch_count += 1
+    # Each fixture owns its process group so Ctrl+C from another Windows console
+    # process cannot gracefully stop this timed recording early.
+    flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    process = subprocess.run([str(a) for a in arguments], env=env, cwd=evidence, capture_output=True, timeout=timeout, creationflags=flags)
+    prefix = evidence / f"process-{launch_count}-{Path(arguments[0]).stem}"
+    prefix.with_suffix(".stdout.log").write_bytes(process.stdout)
+    prefix.with_suffix(".stderr.log").write_bytes(process.stderr)
     if process.returncode:
         raise RuntimeError(f"Installed process exited with {process.returncode}: {process.stderr.decode(errors='replace')}")
     return process
