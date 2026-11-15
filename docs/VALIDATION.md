@@ -1,6 +1,29 @@
 # Windows qualification and migration
 
-## Current preview: 0.1.3
+## Current preview: 0.1.4
+
+0.1.4 is the first preview checked on a physical laptop: an ASUS ROG Strix G17 (Windows 11 build 26200, Ryzen 7 4800H, 16 GB, RTX 3050 Ti Laptop GPU plus Radeon iGPU driving a 1920×1080 144 Hz panel at 100% scaling, Iriun phone webcam, Realtek microphone, Bluetooth headset). The owner's report on 0.1.3 (it didn't record, the camera couldn't be added, the window list was nearly empty) was traced through the session log and the code, and each cause is fixed:
+
+- **Record with no preview recorded nothing.** It opened Add and stopped there. Record and Start broadcast now start the preview (asking for sources once if none were ever chosen) and begin the output after one second of preview, once the encoder test has settled. On the laptop, one press of Record produced both canvases 1.3 s after the preview started, with no skipped frames.
+- **Add was disabled during a preview**, so the camera could never join. It now offers **Switch sources**; the preview restarted in 49 ms on a newly chosen window.
+- **Minimised windows were left out of the window list.** They are listed as "(minimised)". Minimising the captured window keeps its last picture and shows a notice, which cleared within five seconds of restoring it.
+- **Settings were forgotten** on every launch, and the canvas defaulted to 1280×720. Canvas size, frame rate, sources and destinations are now saved, the default is 1920×1080, and stream keys live in Windows Credential Manager.
+- **Every recording began by skipping pictures.** Recordings may now queue up to a second of pictures until their encoder and file are open, instead of eight. On the laptop's two NVENC sessions, start-up skips fell from 7 to 0 (16:9) and from 19 to 2 (9:16), and the false "cannot encode every frame" warning, which also counted the frames a stream discards by design while connecting, no longer appears.
+- **Stale state and a dialog race.** Record decided from engine state up to 50 ms old: clicked just after the preview ended, it stuck on "Stop recording". A queued Record could also start the preview underneath the open Add dialog. Both are fixed, and `studio-ui` now covers Record with the preview stopped (2 failures in 5 runs before, 8 of 8 passes after).
+- **A silent camera now raises a notice.** A camera that stays connected but sends no pictures (a phone camera whose phone went away) blanked without a word. It now shows a notice after three seconds.
+
+Measured on the laptop:
+
+- **Encoder:** NVENC chosen automatically for both canvases; about 6 ms colour conversion and 1 ms encode per 1080p frame; studio render of both canvases plus monitors about 10 ms per frame, with no late frames while switching through all eight scenes.
+- **Ten-minute show** (0.1.3 engine; capture, encoding and streaming are unchanged in 0.1.4): both canvases at 1080p30 recorded while streaming to a local mediamtx RTMP server, read back by a second client. 17,993 / 17,981 / 17,959 of 18,000 frames, every skip in the first two seconds, no reconnects. A two-minute repeat with 0.1.4 skipped 0 and 2 frames; that run's stream reconnected once at start-up while the local server took three seconds to accept the publish, then ran cleanly.
+- **A/V sync:** `tests/av_sync_real.py` (new) played a flash-and-beep stimulus and measured the captured screen against WASAPI loopback: sound 18 ms ahead of picture (median) in both canvases and in the received stream, all 600 events matched, 21 ms drift over ten minutes.
+- **Load:** about 23% total CPU and 42% NVIDIA video-encoder use while recording both 1080p canvases.
+- **Closing while recording:** the app asks, then finalizes both files (136.6 s each, no decode errors).
+- **Scaling:** with Qt's scale factor at 125% and 150% the window fits the 1080p work area and the transport stays reachable. True Windows display scaling and multiple displays were not available.
+
+Not yet checked on hardware: unplugging the camera and headset mid-show (the automated `source-failures` suite covers the code path), the microphone privacy-denied message, vendor encoders other than NVENC, and real streaming services.
+
+## Previous preview: 0.1.3
 
 0.1.3 follows a study of how OBS Studio, Sunshine and Microsoft's capture sample handle the same problems; the findings and the rules taken from them are in [RELIABILITY.md](RELIABILITY.md). It fixes the studio freezing when **Add** is clicked and changes how the engine behaves when something goes wrong.
 

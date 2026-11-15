@@ -6,8 +6,8 @@ Windows 11 **Intel/AMD x64** desktop studio: screen/window and webcam capture, l
 
 ## Install on your laptop — no build tools required
 
-1. Open [Windows downloads, v0.1.3](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.3).
-2. Download `Framecast-Studio-Windows-0.1.3-x64-Setup.exe` and run it. Windows may display an unknown-publisher warning because this preview is unsigned.
+1. Open [Windows downloads, v0.1.4](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.4).
+2. Download `Framecast-Studio-Windows-0.1.4-x64-Setup.exe` and run it. Windows may display an unknown-publisher warning because this preview is unsigned.
 3. Open **Framecast Studio** from the Start menu. Choose **Add → select your sources → Start preview**. Use **Record** for local files or **Destinations** followed by **Start broadcast**.
 
 The installer includes Qt, FFmpeg and the C++ runtimes. It installs into `%LOCALAPPDATA%\Programs\Framecast Studio` for your user account. The portable ZIP is an alternative: extract the entire ZIP into a folder and open `FramecastStudio.exe`.
@@ -15,7 +15,7 @@ The installer includes Qt, FFmpeg and the C++ runtimes. It installs into `%LOCAL
 To verify a downloaded installer in PowerShell:
 
 ```powershell
-Get-FileHash .\Framecast-Studio-Windows-0.1.3-x64-Setup.exe -Algorithm SHA256
+Get-FileHash .\Framecast-Studio-Windows-0.1.4-x64-Setup.exe -Algorithm SHA256
 Get-Content .\SHA256SUMS.txt
 ```
 
@@ -33,9 +33,9 @@ Without Git, use `curl.exe`, which ships with Windows 11. In PowerShell type `cu
 
 ```powershell
 cd $HOME\Downloads
-curl.exe -LO https://github.com/DhananjaySarathe/framecast-studio-windows/releases/download/v0.1.3/Framecast-Studio-Windows-0.1.3-x64-Setup.exe
-Get-FileHash .\Framecast-Studio-Windows-0.1.3-x64-Setup.exe
-.\Framecast-Studio-Windows-0.1.3-x64-Setup.exe
+curl.exe -LO https://github.com/DhananjaySarathe/framecast-studio-windows/releases/download/v0.1.4/Framecast-Studio-Windows-0.1.4-x64-Setup.exe
+Get-FileHash .\Framecast-Studio-Windows-0.1.4-x64-Setup.exe
+.\Framecast-Studio-Windows-0.1.4-x64-Setup.exe
 ```
 
 The hash should be `803ae18087aa6cefd6e9c1bd7561ca67211db75aff2b1b39e344836b89b3006c`. The release is a pre-release, so link to the exact version: GitHub's `/releases/latest` link skips pre-releases.
@@ -48,7 +48,7 @@ cd framecast-studio-windows
 .\install.cmd -Silent
 ```
 
-`install.cmd` downloads the v0.1.3 release installer and checks its SHA-256 against the release checksum file before running it. Omit `-Silent` to use the installer wizard. No compiler, Python or Qt SDK is needed for this command. If Git is not installed, use the download above, or download the repository ZIP through **Code → Download ZIP** and run `install.cmd` from the extracted project folder.
+`install.cmd` downloads the v0.1.4 release installer and checks its SHA-256 against the release checksum file before running it. Omit `-Silent` to use the installer wizard. No compiler, Python or Qt SDK is needed for this command. If Git is not installed, use the download above, or download the repository ZIP through **Code → Download ZIP** and run `install.cmd` from the extracted project folder.
 
 To update an existing clone, close Framecast Studio, then run:
 

@@ -4,9 +4,9 @@ This repository contains only the Windows implementation. The Mac app lives in h
 
 ## Install on a Windows laptop
 
-Target: Windows 11 on Intel or AMD, 64-bit. Download `Framecast-Studio-Windows-0.1.3-x64-Setup.exe` from the [v0.1.3 release](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.3) and run it; it installs into your user account and adds a Start menu entry. Qt and the C++ runtime are included, so Visual Studio, Python and Qt are not needed on the laptop. The portable ZIP is an alternative: extract the entire folder and open `FramecastStudio.exe`.
+Target: Windows 11 on Intel or AMD, 64-bit. Download `Framecast-Studio-Windows-0.1.4-x64-Setup.exe` from the [v0.1.4 release](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.4) and run it; it installs into your user account and adds a Start menu entry. Qt and the C++ runtime are included, so Visual Studio, Python and Qt are not needed on the laptop. The portable ZIP is an alternative: extract the entire folder and open `FramecastStudio.exe`.
 
-This preview installer is unsigned; Windows may show an unknown-publisher or SmartScreen prompt. Use the release's `SHA256SUMS.txt` to identify the build. The application does not start capture on launch. Open **Add**, select your sources, and choose **Start preview**. Scenes and recording preferences are kept between launches; stream keys are kept only for the current session.
+This preview installer is unsigned; Windows may show an unknown-publisher or SmartScreen prompt. Use the release's `SHA256SUMS.txt` to identify the build. The application does not start capture on launch. Open **Add**, select your sources, and choose **Start preview**. Scenes, canvas size, frame rate, chosen sources, recording preferences and destinations are kept between launches; stream keys are stored in Windows Credential Manager, never in settings or logs. **Record** or **Start broadcast** with no preview running starts the preview with the last sources (asking once if none were chosen) and begins the output when it is live. **Add** during a preview offers **Switch sources**, which restarts the preview with the new choice.
 
 The pipeline tests installer execution, installed-app launch with developer runtime paths removed, actual dual-canvas media files, and uninstall. Physical webcam/microphone, graphics-driver combinations and real streaming-platform credentials still require laptop testing. An unavailable native capture service on a hosted Windows VM is reported as a skipped test, not as a capture pass.
 
@@ -19,7 +19,8 @@ The pipeline tests installer execution, installed-app launch with developer runt
 - Layer position, size, opacity, fit, shape and mirror controls connected to the compositor.
 - Microphone, desktop and master faders, mute and live RMS meters connected to the mixer.
 - Independent recording and broadcast start/stop controls. Outputs finalize off the render thread, and stopping a broadcast leaves local recording and preview running.
-- Source selection, recording folder/container/canvas settings, and multiple RTMP/RTMPS destinations with masked, session-only stream keys.
+- Source selection, recording folder/container/canvas settings, and multiple RTMP/RTMPS destinations with masked stream keys stored in Windows Credential Manager.
+- Source notices that do not stop the show: a minimised capture window (its last picture stays on screen) and a camera that is connected but sends no pictures, as phone cameras such as Iriun do when the phone goes away.
 - Scene and recording preferences saved through QSettings; capture never starts automatically on a normal launch.
 
 On Windows, open **Add**, select a screen/window and optional webcam and audio, then choose **Start preview**. Choose **Both**, **16:9** or **9:16** to select the recording canvases. **Destinations** configures enabled broadcast outputs independently. On this development Mac use `--synthetic`; native capture is Windows-only.
