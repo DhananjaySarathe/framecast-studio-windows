@@ -223,6 +223,9 @@ struct OutputWorker::Impl {
                         session = std::make_unique<Session>(cancel);
                         session->open(spec, batch);
                         std::lock_guard lock(mutex);
+                        // submit() can fail the recording queue while encoder/file
+                        // startup is blocked. That failure must remain authoritative.
+                        if (failed) throw std::runtime_error(status.error);
                         if (spec.streaming) {
                             // Connection setup can take longer than the bounded queue's
                             // duration. Start this encoder's clock at the newest batch

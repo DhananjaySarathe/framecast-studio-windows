@@ -1,8 +1,8 @@
 #include <windows.h>
 IDI_ICON1 ICON "@CMAKE_CURRENT_SOURCE_DIR@/assets/Framecast.ico"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION 0,1,1,0
+ PRODUCTVERSION 0,1,1,0
  FILEFLAGSMASK 0x3fL
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
@@ -13,11 +13,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Dhananjay Sarathe"
       VALUE "FileDescription", "Framecast Studio"
-      VALUE "FileVersion", "0.1.0"
+      VALUE "FileVersion", "0.1.1"
       VALUE "InternalName", "FramecastStudio"
       VALUE "OriginalFilename", "FramecastStudio.exe"
       VALUE "ProductName", "Framecast Studio"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "ProductVersion", "0.1.1"
     END
   END
   BLOCK "VarFileInfo"

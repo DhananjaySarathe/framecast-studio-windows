@@ -1,5 +1,5 @@
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$')][string]$Version = "0.1.0",
+    [ValidatePattern('^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$')][string]$Version = "0.1.1",
     [switch]$Silent,
     [string]$InstallerPath,
     [string]$ChecksumPath,
