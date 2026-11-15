@@ -28,6 +28,74 @@ bool softwareEncoder(const std::string& name) { return name == "libopenh264" || 
 // encoders (QSV sessions, AMF and CUDA DLLs) can take long enough to fill a recording queue at start.
 std::mutex encoderCacheMutex;
 std::map<std::string, std::string> encoderCache;
+// Opens the first H.264 encoder that works for this output. label names it, with the encoded size when that
+// differs from the canvas.
+AVCodecContext* openVideoEncoder(const OutputSpec& spec, bool globalHeader, std::string& label) {
+    AVCodecContext* video = nullptr;
+    std::vector<std::string> candidates;
+    if (spec.encoder != "auto") candidates = {spec.encoder};
+    else {
+#ifdef _WIN32
+        // Media Foundation (h264_mf) reaches the GPU's own encoder on any vendor through Windows,
+        // without the NVIDIA, Intel or AMD runtimes the dedicated encoders need.
+        candidates = {"h264_nvenc", "h264_qsv", "h264_amf", "h264_mf", "libopenh264", "libx264"};
+#else
+        candidates = {"libx264", "libopenh264"};
+#endif
+    }
+    const std::string cacheKey = std::to_string(spec.width)+"x"+std::to_string(spec.height)+"@"+std::to_string(spec.fps);
+    if (spec.encoder == "auto") {
+        std::lock_guard guard(encoderCacheMutex);
+        const auto cached = encoderCache.find(cacheKey);
+        if (cached != encoderCache.end()) {
+            candidates.erase(std::remove(candidates.begin(), candidates.end(), cached->second), candidates.end());
+            candidates.insert(candidates.begin(), cached->second);
+        }
+    }
+    // Without a hardware encoder, two 1080p30 software encodes do not keep up on a laptop (or a 4-core CI
+    // runner): the recording queue fills within a second and the recording fails. In automatic mode a software
+    // encoder records at most 1280x720 / 720x1280 instead; the canvas and the studio stay at full size.
+    auto encodeSize = [&](const std::string& name) {
+        if (spec.encoder != "auto" || !softwareEncoder(name) || int64_t(spec.width)*spec.height <= 1280LL*720)
+            return std::pair{spec.width, spec.height};
+        const double scale = std::sqrt(1280.*720/(double(spec.width)*spec.height));
+        return std::pair{std::max(2, static_cast<int>(std::lround(spec.width*scale/2))*2),
+                         std::max(2, static_cast<int>(std::lround(spec.height*scale/2))*2)};
+    };
+    for (const auto& name : candidates) {
+        const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
+        if (!codec || codec->id != AV_CODEC_ID_H264) continue;
+        AVCodecContext* c = avcodec_alloc_context3(codec);
+        if (!c) throw std::bad_alloc();
+        const auto [encodeWidth, encodeHeight] = encodeSize(name);
+        c->width = encodeWidth; c->height = encodeHeight;
+        c->time_base = {1, spec.fps}; c->framerate = {spec.fps, 1};
+        c->pix_fmt = name == "h264_qsv" || name == "h264_nvenc" || name == "h264_amf" || name == "h264_mf"
+            ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
+        c->bit_rate = int64_t(spec.videoKbps)*1000;
+        c->rc_max_rate = c->bit_rate; c->rc_buffer_size = static_cast<int>(c->bit_rate*2);
+        c->gop_size = spec.fps*2; c->max_b_frames = 0;
+        c->color_range = AVCOL_RANGE_MPEG; c->colorspace = AVCOL_SPC_BT709;
+        c->color_primaries = AVCOL_PRI_BT709; c->color_trc = AVCOL_TRC_BT709;
+        // Software encoders get more threads; two outputs together use about all cores.
+        c->thread_count = softwareEncoder(name)
+            ? static_cast<int>(std::clamp(std::thread::hardware_concurrency()/2, 2u, 4u)) : 2;
+        if (globalHeader) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+        AVDictionary* options = nullptr;
+        if (name == "libx264") { av_dict_set(&options, "preset", "veryfast", 0); av_dict_set(&options, "tune", "zerolatency", 0); }
+        int result = avcodec_open2(c, codec, &options); av_dict_free(&options);
+        if (result >= 0) {
+            video = c;
+            label = encodeWidth == spec.width && encodeHeight == spec.height ? name
+                : name+" at "+std::to_string(encodeWidth)+"x"+std::to_string(encodeHeight);
+            if (spec.encoder == "auto") { std::lock_guard guard(encoderCacheMutex); encoderCache[cacheKey] = name; }
+            break;
+        }
+        avcodec_free_context(&c);
+    }
+    if (!video) throw std::runtime_error("No usable H.264 encoder. Install an FFmpeg build with OpenH264 or a supported hardware encoder.");
+    return video;
+}
 struct Session {
     AVFormatContext* format = nullptr;
     AVCodecContext *video = nullptr, *audio = nullptr;
@@ -42,6 +110,8 @@ struct Session {
     bool header = false;
     std::string encoder;
     int sourceWidth = 0, sourceHeight = 0;
+    double convertTotal = 0, encodeTotal = 0; // milliseconds, over timedFrames
+    uint64_t timedFrames = 0;
     explicit Session(std::atomic<bool>& stop) : cancel(stop) {}
     ~Session() {
         if (format && format->pb) avio_closep(&format->pb);
@@ -65,65 +135,7 @@ struct Session {
         checked(avformat_alloc_output_context2(&format, nullptr, spec.streaming ? "flv" : nullptr, spec.destination.c_str()), "Choose output container");
         if (!format) throw std::runtime_error("Unsupported output container");
         format->interrupt_callback = {interrupt, this};
-        std::vector<std::string> candidates;
-        if (spec.encoder != "auto") candidates = {spec.encoder};
-        else {
-#ifdef _WIN32
-            candidates = {"h264_nvenc", "h264_qsv", "h264_amf", "libopenh264", "libx264"};
-#else
-            candidates = {"libx264", "libopenh264"};
-#endif
-        }
-        const std::string cacheKey = std::to_string(spec.width)+"x"+std::to_string(spec.height)+"@"+std::to_string(spec.fps);
-        if (spec.encoder == "auto") {
-            std::lock_guard guard(encoderCacheMutex);
-            const auto cached = encoderCache.find(cacheKey);
-            if (cached != encoderCache.end()) {
-                candidates.erase(std::remove(candidates.begin(), candidates.end(), cached->second), candidates.end());
-                candidates.insert(candidates.begin(), cached->second);
-            }
-        }
-        // Without a hardware encoder, two 1080p30 software encodes do not keep up on a laptop (or a 4-core CI
-        // runner): the recording queue fills within a second and the recording fails. In automatic mode a software
-        // encoder records at most 1280x720 / 720x1280 instead; the canvas and the studio stay at full size.
-        auto encodeSize = [&](const std::string& name) {
-            if (spec.encoder != "auto" || !softwareEncoder(name) || int64_t(spec.width)*spec.height <= 1280LL*720)
-                return std::pair{spec.width, spec.height};
-            const double scale = std::sqrt(1280.*720/(double(spec.width)*spec.height));
-            return std::pair{std::max(2, static_cast<int>(std::lround(spec.width*scale/2))*2),
-                             std::max(2, static_cast<int>(std::lround(spec.height*scale/2))*2)};
-        };
-        for (const auto& name : candidates) {
-            const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
-            if (!codec || codec->id != AV_CODEC_ID_H264) continue;
-            AVCodecContext* c = avcodec_alloc_context3(codec);
-            if (!c) throw std::bad_alloc();
-            const auto [encodeWidth, encodeHeight] = encodeSize(name);
-            c->width = encodeWidth; c->height = encodeHeight;
-            c->time_base = {1, spec.fps}; c->framerate = {spec.fps, 1};
-            c->pix_fmt = name == "h264_qsv" || name == "h264_nvenc" || name == "h264_amf" ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-            c->bit_rate = int64_t(spec.videoKbps)*1000;
-            c->rc_max_rate = c->bit_rate; c->rc_buffer_size = static_cast<int>(c->bit_rate*2);
-            c->gop_size = spec.fps*2; c->max_b_frames = 0;
-            c->color_range = AVCOL_RANGE_MPEG; c->colorspace = AVCOL_SPC_BT709;
-            c->color_primaries = AVCOL_PRI_BT709; c->color_trc = AVCOL_TRC_BT709;
-            // Software encoders get more threads; two outputs together use about all cores.
-            c->thread_count = softwareEncoder(name)
-                ? static_cast<int>(std::clamp(std::thread::hardware_concurrency()/2, 2u, 4u)) : 2;
-            if (format->oformat->flags & AVFMT_GLOBALHEADER) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-            AVDictionary* options = nullptr;
-            if (name == "libx264") { av_dict_set(&options, "preset", "veryfast", 0); av_dict_set(&options, "tune", "zerolatency", 0); }
-            int result = avcodec_open2(c, codec, &options); av_dict_free(&options);
-            if (result >= 0) {
-                video = c;
-                encoder = encodeWidth == spec.width && encodeHeight == spec.height ? name
-                    : name+" at "+std::to_string(encodeWidth)+"x"+std::to_string(encodeHeight);
-                if (spec.encoder == "auto") { std::lock_guard guard(encoderCacheMutex); encoderCache[cacheKey] = name; }
-                break;
-            }
-            avcodec_free_context(&c);
-        }
-        if (!video) throw std::runtime_error("No usable H.264 encoder. Install an FFmpeg build with OpenH264 or a supported hardware encoder.");
+        video = openVideoEncoder(spec, format->oformat->flags & AVFMT_GLOBALHEADER, encoder);
         const AVCodec* aac = avcodec_find_encoder_by_name("aac");
         if (!aac) throw std::runtime_error("AAC encoder unavailable");
         audio = avcodec_alloc_context3(aac);
@@ -205,10 +217,13 @@ struct Session {
             throw std::runtime_error("Output frame size or audio timeline discontinuity");
         checked(av_frame_make_writable(vf), "Reuse video frame");
         const uint8_t* source[] = {batch.video->bgra.data()}; int stride[] = {sourceWidth*4};
+        const Nanoseconds started = hostNow();
         if (sws_scale(scaler, source, stride, 0, sourceHeight, vf->data, vf->linesize) != video->height)
             throw std::runtime_error("Convert video frame");
+        const Nanoseconds convertDone = hostNow();
         vf->pts = batch.frame-baseFrame;
         encode(video, vs, vf);
+        convertTotal += (convertDone-started)/1e6; encodeTotal += (hostNow()-convertDone)/1e6; ++timedFrames;
         const int frames = static_cast<int>(batch.audio->size()/2);
         expectedSample += frames;
         uint8_t** converted = nullptr;
@@ -279,6 +294,8 @@ struct OutputWorker::Impl {
                     }
                     session->write(batch);
                     std::lock_guard lock(mutex); ++status.frames; attempts = 0;
+                    status.convertMs = session->convertTotal/session->timedFrames;
+                    status.encodeMs = session->encodeTotal/session->timedFrames;
                 } catch (const std::exception& e) {
                     session.reset();
                     std::unique_lock lock(mutex);
@@ -304,6 +321,26 @@ struct OutputWorker::Impl {
         done = true;
     }
 };
+std::vector<std::string> availableH264Encoders() {
+    std::vector<std::string> out;
+    void* state = nullptr;
+    while (const AVCodec* codec = av_codec_iterate(&state))
+        if (codec->id == AV_CODEC_ID_H264 && av_codec_is_encoder(codec)) out.push_back(codec->name);
+    return out;
+}
+void warmEncoders(int width, int height, int fps) {
+    for (auto canvas : {Canvas::horizontal, Canvas::vertical}) {
+        OutputSpec spec;
+        spec.canvas = canvas; spec.fps = fps;
+        spec.width = canvas == Canvas::horizontal ? width : height;
+        spec.height = canvas == Canvas::horizontal ? height : width;
+        try {
+            std::string label;
+            AVCodecContext* c = openVideoEncoder(spec, false, label);
+            avcodec_free_context(&c);
+        } catch (...) {} // The recording reports the real error if nothing works.
+    }
+}
 OutputWorker::OutputWorker(OutputSpec spec) {
     if (spec.width < 2 || spec.height < 2 || spec.width%2 || spec.height%2 || spec.fps < 1 || spec.fps > 120 ||
         spec.videoKbps < 100 || spec.videoKbps > 100000 || spec.destination.empty()) throw std::invalid_argument("Invalid output specification");

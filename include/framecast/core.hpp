@@ -107,9 +107,14 @@ struct OutputBatch {
 struct OutputStatus {
     std::string state = "starting", error, encoder;
     uint64_t frames = 0, dropped = 0, reconnects = 0;
+    double convertMs = 0, encodeMs = 0; // average per frame: colour conversion, then the encoder
     std::string id;
     bool streaming = false;
 };
+// H.264 encoders compiled into this FFmpeg build (not all of them work on every machine).
+std::vector<std::string> availableH264Encoders();
+// Opens and closes each canvas's encoder once so the first recording skips slow hardware probes.
+void warmEncoders(int width, int height, int fps);
 class OutputWorker {
 public:
     explicit OutputWorker(OutputSpec spec);

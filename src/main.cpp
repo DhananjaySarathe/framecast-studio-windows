@@ -105,7 +105,8 @@ int engineMain(int argc, char** argv) {
             for (size_t n = 0; n < statuses.size(); ++n) {
                 const auto& s = statuses[n];
                 std::cerr << "output " << n+1 << ": " << s.state << " frames=" << s.frames << " dropped=" << s.dropped
-                          << " reconnects=" << s.reconnects << " encoder=" << s.encoder;
+                          << " reconnects=" << s.reconnects << " encoder=" << s.encoder
+                          << " convert_ms=" << s.convertMs << " encode_ms=" << s.encodeMs;
                 if (!s.error.empty()) std::cerr << " (" << s.error << ")";
                 std::cerr << '\n';
             }

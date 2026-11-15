@@ -65,6 +65,10 @@ int runEngine(const EngineConfig& cfg, std::atomic<bool>& stop,
         if (onStatus) onStatus(statuses);
         return statuses;
     };
+    // In the studio, settle the encoder choice while the preview runs, before anyone presses Record.
+    std::thread warm;
+    if (live) warm = std::thread([&cfg] { warmEncoders(cfg.width, cfg.height, cfg.fps); });
+    struct JoinWarm { std::thread& t; ~JoinWarm() { if (t.joinable()) t.join(); } } joinWarm{warm};
     LiveState state;
     state.running = true;
     if (live) live->publish(state);
