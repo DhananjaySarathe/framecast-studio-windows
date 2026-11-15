@@ -14,6 +14,14 @@ namespace framecast {
 constexpr int sampleRate = 48000;
 using Nanoseconds = int64_t;
 Nanoseconds hostNow();
+
+// Diagnostics log. Every line is timestamped and flushed at once, so a freeze or a crash still leaves
+// its trail on disk. Nothing is written until setLogFile names a file (UTF-8 path).
+void setLogFile(const std::string& path);
+void logLine(const std::string& message);
+// One paragraph about this computer: operating system, processor, memory and, on Windows, graphics
+// adapters, displays and power state.
+std::string describeSystem();
 int64_t samplesAtFrame(int64_t frame, int fps);
 
 enum class Canvas { horizontal, vertical };
@@ -52,6 +60,10 @@ Scene screenScene();
 Image compose(const Scene& scene, Canvas canvas, int width, int height,
               const std::map<std::string, std::shared_ptr<const Image>>& images);
 std::shared_ptr<const Image> testPattern(int64_t frame, int fps, int width = 640, int height = 360);
+// Copies a BGRA frame out of a mapped capture buffer whose rows are pitch bytes apart. Frames wider than
+// 3200 pixels (4K-class displays) are averaged down 2:1 while copying: a 1080p canvas cannot show more,
+// and it quarters the memory every later step touches.
+std::shared_ptr<Image> copyCapturedFrame(const uint8_t* data, size_t pitch, int width, int height);
 
 // Each capture device writes on the same sample timeline. Missing samples are silence.
 class AudioTimeline {
@@ -71,13 +83,35 @@ private:
     std::map<std::string, Ring> sources_;
 };
 
+// poll() and at() may throw when the device fails; the engine then drops the source, warns and reopens it.
 class VideoCapture {
 public:
     virtual ~VideoCapture() = default;
     virtual void poll() = 0;
     virtual std::shared_ptr<const Image> at(Nanoseconds timestamp) = 0;
 };
-class AudioCapture { public: virtual ~AudioCapture() = default; virtual void check() = 0; };
+// Audio capture heals itself: it keeps retrying its device in the background and never stops a session.
+// problem() is empty while audio flows, otherwise a sentence for the person at the studio.
+class AudioCapture { public: virtual ~AudioCapture() = default; virtual std::string problem() = 0; };
+struct EngineConfig;
+// Where the engine gets its sources. Left empty in EngineConfig, the platform's real devices are used;
+// tests supply their own to exercise device failures.
+struct CaptureFactory {
+    std::function<std::unique_ptr<VideoCapture>(const EngineConfig&)> screen, camera;
+    std::function<std::unique_ptr<AudioCapture>(AudioTimeline&, Nanoseconds origin, bool loopback)> audio;
+};
+// While one is alive: 1 ms Windows timer resolution, no Windows 11 background power throttling for this
+// process, and a raised priority for the calling thread. No effect on other platforms.
+class RealtimeScope {
+public:
+    RealtimeScope();
+    ~RealtimeScope();
+    RealtimeScope(const RealtimeScope&) = delete;
+    RealtimeScope& operator=(const RealtimeScope&) = delete;
+private:
+    int previousPriority_ = 0;
+    bool raised_ = false;
+};
 #ifdef _WIN32
 struct CaptureChoice { uintptr_t id; std::string name; };
 std::vector<CaptureChoice> listMonitors();
@@ -139,6 +173,7 @@ struct EngineConfig {
     uintptr_t windowHandle = 0;
     Scene scene = screenScene();
     std::vector<OutputSpec> outputs;
+    std::shared_ptr<const CaptureFactory> capture; // empty: this platform's devices
 };
 struct LiveCommands {
     Scene program = screenScene();
@@ -151,6 +186,9 @@ struct LiveState {
     std::string error;
     int64_t frame = 0;
     uint64_t lateFrames = 0; // frames that repeated the previous picture because the engine was behind
+    // Sources that are not working right now ("Camera unavailable: ..."). The session carries on without
+    // them and they are retried in the background; this list empties when they return.
+    std::vector<std::string> warnings;
     float microphone = 0, desktop = 0, master = 0;
     // Monitor-sized renders (at most 960 wide), not the full output canvases.
     std::map<Canvas, std::shared_ptr<const Image>> program, preview;

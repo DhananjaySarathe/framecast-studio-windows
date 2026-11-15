@@ -4,12 +4,21 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iomanip>
+#include <sstream>
 #include <thread>
 #include <limits>
 #include <stdexcept>
 #ifdef _WIN32
 #include <windows.h>
+#include <timeapi.h>
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
 #endif
 
 namespace framecast {
@@ -22,6 +31,64 @@ Nanoseconds hostNow() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 #endif
 }
+namespace {
+std::mutex logMutex;
+std::ofstream logStream;
+}
+void setLogFile(const std::string& path) {
+    std::lock_guard guard(logMutex);
+    if (logStream.is_open()) logStream.close();
+    if (path.empty()) return;
+    logStream.open(std::filesystem::path(std::u8string(path.begin(), path.end())), std::ios::app);
+}
+void logLine(const std::string& message) {
+    std::lock_guard guard(logMutex);
+    if (!logStream.is_open()) return;
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    const auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &seconds);
+#else
+    localtime_r(&seconds, &local);
+#endif
+    logStream << std::put_time(&local, "%Y-%m-%d %H:%M:%S") << '.' << std::setw(3) << std::setfill('0') << millis
+              << ' ' << message << '\n';
+    logStream.flush();
+}
+#ifdef _WIN32
+RealtimeScope::RealtimeScope() {
+    // Default Windows sleeps are only accurate to about 15.6 ms, half a frame at 30 fps.
+    timeBeginPeriod(1);
+    // Windows 11 slows timers and moves threads to efficiency cores for apps whose window is hidden or
+    // covered. A studio spends the whole show behind the app being presented, so opt out of both.
+    PROCESS_POWER_THROTTLING_STATE throttling{};
+    throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+    throttling.StateMask = 0;
+    if (!SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling))) {
+        // Before Windows 11 the timer-resolution flag is unknown and the whole call is rejected.
+        throttling.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+        SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling, sizeof(throttling));
+    }
+    previousPriority_ = GetThreadPriority(GetCurrentThread());
+    raised_ = previousPriority_ != THREAD_PRIORITY_ERROR_RETURN &&
+              SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+}
+RealtimeScope::~RealtimeScope() {
+    if (raised_) SetThreadPriority(GetCurrentThread(), previousPriority_);
+    timeEndPeriod(1);
+}
+#else
+RealtimeScope::RealtimeScope() {}
+RealtimeScope::~RealtimeScope() { (void)previousPriority_; (void)raised_; }
+#endif
+#ifndef _WIN32
+std::string describeSystem() {
+    return "Non-Windows development build, " + std::to_string(std::thread::hardware_concurrency()) + " logical processors";
+}
+#endif
 int64_t samplesAtFrame(int64_t frame, int fps) {
     if (fps < 1 || fps > 120 || frame < 0) throw std::invalid_argument("Invalid frame clock");
     return frame * sampleRate / fps;
@@ -239,6 +306,29 @@ std::shared_ptr<const Image> testPattern(int64_t frame, int fps, int width, int 
         image->bgra[p] = flash ? 255 : 20;
         image->bgra[p+1] = flash ? 255 : static_cast<uint8_t>(30 + (x+frame*3)%90);
         image->bgra[p+2] = flash ? 255 : static_cast<uint8_t>(30+y%60);
+    }
+    return image;
+}
+std::shared_ptr<Image> copyCapturedFrame(const uint8_t* data, size_t pitch, int width, int height) {
+    if (!data || width < 1 || height < 1 || width > 16384 || height > 16384 || pitch < static_cast<size_t>(width)*4)
+        throw std::invalid_argument("Invalid captured frame");
+    auto image = std::make_shared<Image>();
+    if (width <= 3200) {
+        // Appending rows fills the buffer once; Image(w, h) would first write every pixel black.
+        image->width = width; image->height = height;
+        image->bgra.reserve(static_cast<size_t>(width)*height*4);
+        for (int row = 0; row < height; ++row)
+            image->bgra.insert(image->bgra.end(), data + row*pitch, data + row*pitch + static_cast<size_t>(width)*4);
+        return image;
+    }
+    image->width = width/2; image->height = height/2;
+    image->bgra.resize(static_cast<size_t>(image->width)*image->height*4);
+    for (int y = 0; y < image->height; ++y) {
+        const uint8_t* top = data + static_cast<size_t>(y)*2*pitch;
+        const uint8_t* bottom = top + pitch;
+        uint8_t* out = image->bgra.data() + static_cast<size_t>(y)*image->width*4;
+        for (int x = 0; x < image->width; ++x, top += 8, bottom += 8, out += 4)
+            for (int c = 0; c < 4; ++c) out[c] = static_cast<uint8_t>((top[c] + top[c+4] + bottom[c] + bottom[c+4] + 2) / 4);
     }
     return image;
 }

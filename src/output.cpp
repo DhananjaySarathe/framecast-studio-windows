@@ -2,6 +2,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <stdexcept>
@@ -24,77 +25,150 @@ void checked(int result, const char* operation) {
     throw std::runtime_error(std::string(operation)+": "+message);
 }
 bool softwareEncoder(const std::string& name) { return name == "libopenh264" || name == "libx264"; }
-// The encoder that last opened for this size, tried first next time. Probing unavailable hardware
-// encoders (QSV sessions, AMF and CUDA DLLs) can take long enough to fill a recording queue at start.
-std::mutex encoderCacheMutex;
-std::map<std::string, std::string> encoderCache;
-// Opens the first H.264 encoder that works for this output. label names it, with the encoded size when that
-// differs from the canvas.
-AVCodecContext* openVideoEncoder(const OutputSpec& spec, bool globalHeader, std::string& label) {
-    AVCodecContext* video = nullptr;
-    std::vector<std::string> candidates;
-    if (spec.encoder != "auto") candidates = {spec.encoder};
-    else {
+std::string avError(int code) {
+    char message[AV_ERROR_MAX_STRING_SIZE]; av_strerror(code, message, sizeof(message));
+    return message;
+}
+// One way of encoding H.264: an FFmpeg encoder plus the options that select a variant of it.
+struct EncoderChoice {
+    std::string label, codec;
+    std::vector<std::pair<std::string, std::string>> options;
+};
+std::vector<EncoderChoice> automaticChoices() {
 #ifdef _WIN32
-        // Media Foundation (h264_mf) reaches the GPU's own encoder on any vendor through Windows,
-        // without the NVIDIA, Intel or AMD runtimes the dedicated encoders need.
-        candidates = {"h264_nvenc", "h264_qsv", "h264_amf", "h264_mf", "libopenh264", "libx264"};
+    // Vendor encoders first, then Media Foundation, which reaches the GPU's encoder on any vendor through
+    // Windows itself, then Microsoft's software encoder, then OpenH264 (the order Sunshine uses).
+    return {{"h264_nvenc", "h264_nvenc", {}},
+            {"h264_qsv", "h264_qsv", {}},
+            {"h264_amf", "h264_amf", {}},
+            {"h264_mf hardware", "h264_mf", {{"hw_encoding", "1"}}},
+            {"h264_mf", "h264_mf", {}},
+            {"libopenh264", "libopenh264", {}},
+            {"libx264", "libx264", {{"preset", "veryfast"}, {"tune", "zerolatency"}}}};
 #else
-        candidates = {"libx264", "libopenh264"};
+    return {{"libx264", "libx264", {{"preset", "veryfast"}, {"tune", "zerolatency"}}}, {"libopenh264", "libopenh264", {}}};
 #endif
-    }
-    const std::string cacheKey = std::to_string(spec.width)+"x"+std::to_string(spec.height)+"@"+std::to_string(spec.fps);
-    if (spec.encoder == "auto") {
-        std::lock_guard guard(encoderCacheMutex);
-        const auto cached = encoderCache.find(cacheKey);
-        if (cached != encoderCache.end()) {
-            candidates.erase(std::remove(candidates.begin(), candidates.end(), cached->second), candidates.end());
-            candidates.insert(candidates.begin(), cached->second);
+}
+// The choice that passed a test encode for a canvas size, so later recordings open it directly. Probing
+// (QSV sessions, AMF and CUDA DLLs, a test encode each) can take longer than a recording queue lasts.
+// encoderProbeMutex lets one thread probe while the others wait and then find the answer cached.
+std::mutex encoderCacheMutex, encoderProbeMutex;
+std::map<std::string, std::string> encoderCache;
+std::string encoderKey(const OutputSpec& spec) {
+    return std::to_string(spec.width)+"x"+std::to_string(spec.height)+"@"+std::to_string(spec.fps);
+}
+// Without a hardware encoder, two 1080p30 OpenH264 encodes do not keep up on a laptop. In automatic mode
+// OpenH264 and x264 record at most 1280x720 / 720x1280; the canvas and the studio stay at full size.
+std::pair<int, int> encodeSize(const OutputSpec& spec, const EncoderChoice& choice) {
+    if (spec.encoder != "auto" || !softwareEncoder(choice.codec) || int64_t(spec.width)*spec.height <= 1280LL*720)
+        return {spec.width, spec.height};
+    const double scale = std::sqrt(1280.*720/(double(spec.width)*spec.height));
+    return {std::max(2, static_cast<int>(std::lround(spec.width*scale/2))*2),
+            std::max(2, static_cast<int>(std::lround(spec.height*scale/2))*2)};
+}
+AVCodecContext* createEncoder(const OutputSpec& spec, const EncoderChoice& choice, bool globalHeader, std::string& why) {
+    const AVCodec* codec = avcodec_find_encoder_by_name(choice.codec.c_str());
+    if (!codec || codec->id != AV_CODEC_ID_H264) { why = "not in this FFmpeg build"; return nullptr; }
+    AVCodecContext* c = avcodec_alloc_context3(codec);
+    if (!c) throw std::bad_alloc();
+    const auto [width, height] = encodeSize(spec, choice);
+    c->width = width; c->height = height;
+    c->time_base = {1, spec.fps}; c->framerate = {spec.fps, 1};
+    c->pix_fmt = softwareEncoder(choice.codec) ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_NV12;
+    c->bit_rate = int64_t(spec.videoKbps)*1000;
+    c->rc_max_rate = c->bit_rate; c->rc_buffer_size = static_cast<int>(c->bit_rate*2);
+    c->gop_size = spec.fps*2; c->max_b_frames = 0;
+    c->color_range = AVCOL_RANGE_MPEG; c->colorspace = AVCOL_SPC_BT709;
+    c->color_primaries = AVCOL_PRI_BT709; c->color_trc = AVCOL_TRC_BT709;
+    // Software encoders get more threads; two outputs together use about all cores.
+    c->thread_count = softwareEncoder(choice.codec)
+        ? static_cast<int>(std::clamp(std::thread::hardware_concurrency()/2, 2u, 4u)) : 2;
+    if (globalHeader) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
+    AVDictionary* options = nullptr;
+    for (const auto& [key, value] : choice.options) av_dict_set(&options, key.c_str(), value.c_str(), 0);
+    const int result = avcodec_open2(c, codec, &options); av_dict_free(&options);
+    if (result < 0) { why = "does not open: " + avError(result); avcodec_free_context(&c); return nullptr; }
+    return c;
+}
+// An encoder that opens is not yet an encoder that works: drivers accept a session and then reject the
+// first frame. Push a few grey frames through and require a packet back (OBS and Sunshine both test
+// encoders before use rather than trusting their names).
+bool testEncode(AVCodecContext* c, std::string& why) {
+    AVFrame* frame = av_frame_alloc();
+    AVPacket* packet = av_packet_alloc();
+    if (!frame || !packet) { av_frame_free(&frame); av_packet_free(&packet); throw std::bad_alloc(); }
+    frame->format = c->pix_fmt; frame->width = c->width; frame->height = c->height;
+    int result = av_frame_get_buffer(frame, 32), packets = 0;
+    auto drain = [&](bool flushing) {
+        for (int n = 0; n < 256 && result >= 0; ++n) {
+            const int received = avcodec_receive_packet(c, packet);
+            if (received == AVERROR_EOF || (received == AVERROR(EAGAIN) && !flushing)) break;
+            if (received == AVERROR(EAGAIN)) continue;
+            if (received < 0) { result = received; break; }
+            ++packets; av_packet_unref(packet);
         }
-    }
-    // Without a hardware encoder, two 1080p30 software encodes do not keep up on a laptop (or a 4-core CI
-    // runner): the recording queue fills within a second and the recording fails. In automatic mode a software
-    // encoder records at most 1280x720 / 720x1280 instead; the canvas and the studio stay at full size.
-    auto encodeSize = [&](const std::string& name) {
-        if (spec.encoder != "auto" || !softwareEncoder(name) || int64_t(spec.width)*spec.height <= 1280LL*720)
-            return std::pair{spec.width, spec.height};
-        const double scale = std::sqrt(1280.*720/(double(spec.width)*spec.height));
-        return std::pair{std::max(2, static_cast<int>(std::lround(spec.width*scale/2))*2),
-                         std::max(2, static_cast<int>(std::lround(spec.height*scale/2))*2)};
     };
-    for (const auto& name : candidates) {
-        const AVCodec* codec = avcodec_find_encoder_by_name(name.c_str());
-        if (!codec || codec->id != AV_CODEC_ID_H264) continue;
-        AVCodecContext* c = avcodec_alloc_context3(codec);
-        if (!c) throw std::bad_alloc();
-        const auto [encodeWidth, encodeHeight] = encodeSize(name);
-        c->width = encodeWidth; c->height = encodeHeight;
-        c->time_base = {1, spec.fps}; c->framerate = {spec.fps, 1};
-        c->pix_fmt = name == "h264_qsv" || name == "h264_nvenc" || name == "h264_amf" || name == "h264_mf"
-            ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
-        c->bit_rate = int64_t(spec.videoKbps)*1000;
-        c->rc_max_rate = c->bit_rate; c->rc_buffer_size = static_cast<int>(c->bit_rate*2);
-        c->gop_size = spec.fps*2; c->max_b_frames = 0;
-        c->color_range = AVCOL_RANGE_MPEG; c->colorspace = AVCOL_SPC_BT709;
-        c->color_primaries = AVCOL_PRI_BT709; c->color_trc = AVCOL_TRC_BT709;
-        // Software encoders get more threads; two outputs together use about all cores.
-        c->thread_count = softwareEncoder(name)
-            ? static_cast<int>(std::clamp(std::thread::hardware_concurrency()/2, 2u, 4u)) : 2;
-        if (globalHeader) c->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
-        AVDictionary* options = nullptr;
-        if (name == "libx264") { av_dict_set(&options, "preset", "veryfast", 0); av_dict_set(&options, "tune", "zerolatency", 0); }
-        int result = avcodec_open2(c, codec, &options); av_dict_free(&options);
-        if (result >= 0) {
-            video = c;
-            label = encodeWidth == spec.width && encodeHeight == spec.height ? name
-                : name+" at "+std::to_string(encodeWidth)+"x"+std::to_string(encodeHeight);
-            if (spec.encoder == "auto") { std::lock_guard guard(encoderCacheMutex); encoderCache[cacheKey] = name; }
-            break;
-        }
-        avcodec_free_context(&c);
+    for (int n = 0; n < 3 && result >= 0; ++n) {
+        result = av_frame_make_writable(frame);
+        if (result < 0) break;
+        std::memset(frame->data[0], 96, static_cast<size_t>(frame->linesize[0])*frame->height);
+        for (int plane = 1; plane < 3 && frame->data[plane]; ++plane)
+            std::memset(frame->data[plane], 128, static_cast<size_t>(frame->linesize[plane])*(frame->height/2));
+        frame->pts = n;
+        result = avcodec_send_frame(c, frame);
+        drain(false);
     }
-    if (!video) throw std::runtime_error("No usable H.264 encoder. Install an FFmpeg build with OpenH264 or a supported hardware encoder.");
-    return video;
+    if (result >= 0) { result = avcodec_send_frame(c, nullptr); drain(true); }
+    av_frame_free(&frame); av_packet_free(&packet);
+    if (result < 0) { why = "fails its test encode: " + avError(result); return false; }
+    if (!packets) { why = "produced no packets in its test encode"; return false; }
+    return true;
+}
+void forgetEncoder(const OutputSpec& spec) {
+    std::lock_guard guard(encoderCacheMutex);
+    encoderCache.erase(encoderKey(spec));
+}
+// Opens an H.264 encoder that is known to work for this output. label names it, with the encoded size
+// when that differs from the canvas.
+AVCodecContext* openVideoEncoder(const OutputSpec& spec, bool globalHeader, std::string& label) {
+    auto named = [&](const EncoderChoice& choice, const AVCodecContext* c) {
+        return c->width == spec.width && c->height == spec.height ? choice.label
+            : choice.label+" at "+std::to_string(c->width)+"x"+std::to_string(c->height);
+    };
+    std::string why;
+    if (spec.encoder != "auto") {
+        // An encoder the person asked for by name is used as given, so its own error is what they see.
+        const EncoderChoice choice{spec.encoder, spec.encoder,
+            spec.encoder == "libx264" ? std::vector<std::pair<std::string, std::string>>{{"preset", "veryfast"}, {"tune", "zerolatency"}}
+                                      : std::vector<std::pair<std::string, std::string>>{}};
+        if (AVCodecContext* c = createEncoder(spec, choice, globalHeader, why)) { label = named(choice, c); return c; }
+        throw std::runtime_error("H.264 encoder " + spec.encoder + " " + why);
+    }
+    std::lock_guard probing(encoderProbeMutex);
+    auto choices = automaticChoices();
+    const std::string key = encoderKey(spec);
+    std::string trusted;
+    {
+        std::lock_guard guard(encoderCacheMutex);
+        const auto cached = encoderCache.find(key);
+        if (cached != encoderCache.end()) trusted = cached->second;
+    }
+    std::stable_partition(choices.begin(), choices.end(), [&](const auto& choice) { return choice.label == trusted; });
+    for (const auto& choice : choices) {
+        if (choice.label != trusted) {
+            AVCodecContext* probe = createEncoder(spec, choice, false, why);
+            const bool works = probe && testEncode(probe, why);
+            avcodec_free_context(&probe);
+            if (!works) { logLine("encoder " + choice.label + " " + why); continue; }
+            logLine("encoder " + choice.label + " passed its test encode for " + key);
+            std::lock_guard guard(encoderCacheMutex);
+            encoderCache[key] = choice.label;
+        }
+        if (AVCodecContext* c = createEncoder(spec, choice, globalHeader, why)) { label = named(choice, c); return c; }
+        logLine("encoder " + choice.label + " " + why);
+        forgetEncoder(spec);
+    }
+    throw std::runtime_error("No usable H.264 encoder. Install an FFmpeg build with OpenH264 or a supported hardware encoder.");
 }
 struct Session {
     AVFormatContext* format = nullptr;
@@ -213,17 +287,21 @@ struct Session {
         }
     }
     void write(const OutputBatch& batch) {
-        if (batch.video->width != sourceWidth || batch.video->height != sourceHeight || batch.sample != expectedSample)
+        if ((batch.video && (batch.video->width != sourceWidth || batch.video->height != sourceHeight)) || batch.sample != expectedSample)
             throw std::runtime_error("Output frame size or audio timeline discontinuity");
-        checked(av_frame_make_writable(vf), "Reuse video frame");
-        const uint8_t* source[] = {batch.video->bgra.data()}; int stride[] = {sourceWidth*4};
-        const Nanoseconds started = hostNow();
-        if (sws_scale(scaler, source, stride, 0, sourceHeight, vf->data, vf->linesize) != video->height)
-            throw std::runtime_error("Convert video frame");
-        const Nanoseconds convertDone = hostNow();
-        vf->pts = batch.frame-baseFrame;
-        encode(video, vs, vf);
-        convertTotal += (convertDone-started)/1e6; encodeTotal += (hostNow()-convertDone)/1e6; ++timedFrames;
+        // A batch without a picture is a skipped frame: its audio is still written, and the previous
+        // picture stays on screen for that interval.
+        if (batch.video) {
+            checked(av_frame_make_writable(vf), "Reuse video frame");
+            const uint8_t* source[] = {batch.video->bgra.data()}; int stride[] = {sourceWidth*4};
+            const Nanoseconds started = hostNow();
+            if (sws_scale(scaler, source, stride, 0, sourceHeight, vf->data, vf->linesize) != video->height)
+                throw std::runtime_error("Convert video frame");
+            const Nanoseconds convertDone = hostNow();
+            vf->pts = batch.frame-baseFrame;
+            encode(video, vs, vf);
+            convertTotal += (convertDone-started)/1e6; encodeTotal += (hostNow()-convertDone)/1e6; ++timedFrames;
+        }
         const int frames = static_cast<int>(batch.audio->size()/2);
         expectedSample += frames;
         uint8_t** converted = nullptr;
@@ -250,6 +328,7 @@ struct OutputWorker::Impl {
     mutable std::mutex mutex;
     std::condition_variable changed;
     std::deque<OutputBatch> queue;
+    size_t queuedPictures = 0;
     OutputStatus status;
     bool closing = false, restart = false, failed = false;
     std::atomic<bool> cancel{false};
@@ -269,6 +348,7 @@ struct OutputWorker::Impl {
                     if (failed || (closing && (queue.empty() || spec.streaming))) break;
                     if (restart) { resetSession = true; restart = false; status.state = "reconnecting"; ++status.reconnects; }
                     batch = std::move(queue.front()); queue.pop_front();
+                    if (batch.video && queuedPictures) --queuedPictures;
                 }
                 if (resetSession) session.reset();
                 try {
@@ -293,14 +373,20 @@ struct OutputWorker::Impl {
                         status.encoder = session->encoder; status.state = "live"; status.error.clear();
                     }
                     session->write(batch);
-                    std::lock_guard lock(mutex); ++status.frames; attempts = 0;
-                    status.convertMs = session->convertTotal/session->timedFrames;
-                    status.encodeMs = session->encodeTotal/session->timedFrames;
+                    std::lock_guard lock(mutex); attempts = 0;
+                    if (batch.video) ++status.frames;
+                    if (session->timedFrames) {
+                        status.convertMs = session->convertTotal/session->timedFrames;
+                        status.encodeMs = session->encodeTotal/session->timedFrames;
+                    }
                 } catch (const std::exception& e) {
                     session.reset();
+                    // Whatever the encoder was, it is no longer trusted: the next output probes again.
+                    if (spec.encoder == "auto") forgetEncoder(spec);
+                    logLine(std::string("warning: output ") + (spec.streaming ? "stream" : "recording") + " error: " + e.what());
                     std::unique_lock lock(mutex);
                     status.error = e.what();
-                    if (!spec.streaming) { failed = true; status.state = "failed"; queue.clear(); break; }
+                    if (!spec.streaming) { failed = true; status.state = "failed"; queue.clear(); queuedPictures = 0; break; }
                     if (closing) break;
                     status.state = "reconnecting"; ++status.reconnects;
                     status.dropped += queue.size()+1; queue.clear(); restart = false;
@@ -338,7 +424,10 @@ void warmEncoders(int width, int height, int fps) {
             std::string label;
             AVCodecContext* c = openVideoEncoder(spec, false, label);
             avcodec_free_context(&c);
-        } catch (...) {} // The recording reports the real error if nothing works.
+            logLine("encoder for " + encoderKey(spec) + ": " + label);
+        } catch (const std::exception& e) {
+            logLine(std::string("warning: ") + e.what()); // The recording reports the same error if nothing works.
+        }
     }
 }
 OutputWorker::OutputWorker(OutputSpec spec) {
@@ -357,13 +446,26 @@ void OutputWorker::submit(OutputBatch batch) {
         throw std::invalid_argument("Invalid output A/V batch");
     std::lock_guard lock(p.mutex);
     if (p.closing || p.failed) return;
-    if (p.queue.size() >= 8) {
-        if (!p.spec.streaming) {
-            p.status.state = "failed"; p.status.error = "Recording cannot keep up; lower resolution or use a hardware encoder.";
-            p.failed = true; p.queue.clear(); p.changed.notify_all(); return;
+    if (p.spec.streaming) {
+        if (p.queue.size() >= 8) { p.status.dropped += p.queue.size(); p.queue.clear(); p.queuedPictures = 0; p.restart = true; }
+    } else {
+        // A recording that falls behind loses pictures, never the file (OBS does the same): once eight
+        // pictures are waiting, further frames are queued with their audio only, so sound stays continuous
+        // and in sync and the previous picture is held. Only a writer that has stopped altogether, with
+        // twenty seconds queued, is given up on.
+        if (p.queue.size() >= static_cast<size_t>(p.spec.fps)*20) {
+            p.status.state = "failed"; p.status.error = "Recording cannot keep up; the disk or the encoder stopped responding.";
+            p.failed = true; p.queue.clear(); p.queuedPictures = 0; p.changed.notify_all();
+            logLine("warning: recording failed: twenty seconds of frames were waiting to be written");
+            return;
         }
-        p.status.dropped += p.queue.size(); p.queue.clear(); p.restart = true;
+        if (p.queuedPictures >= 8) {
+            batch.video.reset();
+            if (p.status.dropped++ % 150 == 0)
+                logLine("warning: recording encoder is behind; skipping pictures (" + std::to_string(p.status.dropped) + " so far)");
+        }
     }
+    if (batch.video) ++p.queuedPictures;
     p.queue.push_back(std::move(batch)); p.changed.notify_one();
 }
 void OutputWorker::requestFinish() {
