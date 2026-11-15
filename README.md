@@ -33,6 +33,13 @@ cd framecast-studio-windows
 
 `install.cmd` downloads the v0.1.1 release installer and checks its SHA-256 against the release checksum file before running it. Omit `-Silent` to use the installer wizard. No compiler, Python or Qt SDK is needed for this command. If Git is not installed, use the download above, or download the repository ZIP through **Code → Download ZIP** and run `install.cmd` from the extracted project folder.
 
+To update an existing clone, close Framecast Studio, then run:
+
+```powershell
+git pull --ff-only
+.\install.cmd -Silent
+```
+
 Uninstall through **Windows Settings → Apps → Installed apps → Framecast Studio → Uninstall**.
 
 ## Build from source
