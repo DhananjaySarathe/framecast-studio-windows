@@ -9,6 +9,7 @@
 - **Devices fail on their own.** `source-failures` runs a session through a busy camera, a screen capture that breaks mid-session, a late microphone and desktop sound that cannot be opened. The recording completes, each failure shows as a warning, and the sources come back without a restart.
 - **Slow encoders cost pictures, not recordings.** `recording-backlog` stalls the writer: the recording completes with skipped pictures counted; only a writer that never recovers fails.
 - **Encoders are test-encoded before use.** On the runner NVENC, Quick Sync, AMF and Media Foundation hardware were rejected and Media Foundation's software encoder passed.
+- **Evidence.** [Windows CI on the released commit](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43718068994) ran all eight CTest suites, the media and RTMP checks and the installer check. The [tag build](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43718607813) produced the [published binaries](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.3), and the [published-release test](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43719170821) downloaded, verified, installed, recorded with and uninstalled them.
 - **Session log.** Each session writes the computer, devices, encoder tests, warnings, statistics and output results to a log, with a watchdog entry if the interface stops responding.
 
 ## Previous preview: 0.1.2
