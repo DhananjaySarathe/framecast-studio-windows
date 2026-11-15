@@ -8,6 +8,8 @@
 - A preview followed by a landscape and a portrait recording at 1920×1080 / 1080×1920: 182 of 182 frames in each, none dropped, 0 of 225 late frames (`realtime-1080p`). No vendor encoder was available, so automatic selection used Media Foundation `h264_mf`, at about 7 ms colour conversion and 1.2 ms encode per frame.
 - The H.264 encoders in the packaged FFmpeg are `libopenh264 h264_amf h264_d3d12va h264_mf h264_nvenc h264_qsv`. OpenH264 alone could not keep two streams at 1080p30, or even 720p30, on that runner. It remains the last fallback, at 720p.
 
+- [Tag build of v0.1.2](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43714032061) produced the [published binaries](https://github.com/DhananjaySarathe/framecast-studio-windows/releases/tag/v0.1.2). The [published-release test](https://github.com/DhananjaySarathe/framecast-studio-windows/actions/runs/43714685310) downloads them, checks the checksum, installs, launches, records both canvases and uninstalls. It passed.
+
 Other changes: the studio monitors receive 960-wide renders instead of full-size frames. Screen readback is limited to about 1.5 times the output rate. Webcams open in a native 30 fps mode near 720p. The encoder choice is settled while the preview runs.
 
 ## Previous preview: 0.1.1
