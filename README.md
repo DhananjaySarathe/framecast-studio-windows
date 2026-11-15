@@ -23,7 +23,18 @@ Compare the matching filename's hash. The install helper below performs this com
 
 ## Install using a command
 
-If you have Git installed, open PowerShell:
+Without Git, use `curl.exe`, which ships with Windows 11. In PowerShell type `curl.exe` rather than `curl`, because `curl` there runs a different command:
+
+```powershell
+cd $HOME\Downloads
+curl.exe -LO https://github.com/DhananjaySarathe/framecast-studio-windows/releases/download/v0.1.1/Framecast-Studio-Windows-0.1.1-x64-Setup.exe
+Get-FileHash .\Framecast-Studio-Windows-0.1.1-x64-Setup.exe
+.\Framecast-Studio-Windows-0.1.1-x64-Setup.exe
+```
+
+The hash should be `cb66db867577d931b36577884986c61c1b25b61b1466e41e9ba6fc61e512de70`. The release is a pre-release, so link to the exact version: GitHub's `/releases/latest` link skips pre-releases.
+
+If you have Git installed, the install helper checks the hash for you. Open PowerShell:
 
 ```powershell
 git clone https://github.com/DhananjaySarathe/framecast-studio-windows.git
